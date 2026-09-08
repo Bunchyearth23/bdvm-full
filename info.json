@@ -5,5 +5,5 @@
   "Author": "Arnaud",
   "EntryMethod": "BDVM.Main.Load",
   "ManagerVersion": "0.27.3",
-  "Requirements": [ "Multiplayer", "SelfShunt" ]
+  "Requirements": [ "Multiplayer", "SelfShunt", "PassengerJobs", "RemoteDispatchLive" ]
 }

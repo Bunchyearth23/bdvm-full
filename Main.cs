@@ -4,6 +4,8 @@ using System.IO;
 using System.Linq;
 using BDVM.Adapters;
 using BDVM.Domain;
+using BDVM.PassengerJobsBridge;
+using DV.Logic.Job;
 using HarmonyLib;
 using MPAPI;
 using MPAPI.Interfaces;
@@ -1216,6 +1218,10 @@ public static class Main
     {
         GUILayout.Space(8f); GUILayout.Label("Passenger economy (existing PassengerJobs observation; no second payout)");
         if (!runtimeSettings.EnablePassengerEconomy) { GUILayout.Label("Passenger economy is disabled by runtime settings."); return; }
+        var passengerJobsMod = UnityModManager.FindMod("PassengerJobs");
+        var passengerJobs = new PassengerJobsRuntimeBridge(passengerJobsMod?.Info?.Version, passengerJobsMod?.Assembly);
+        GUILayout.Label("PassengerJobs bridge: " + passengerJobs.Status.State + " | version=" + passengerJobs.Status.ModVersion + " | " + passengerJobs.Status.Code);
+        if (!passengerJobs.Status.IsAvailable) { GUILayout.Label("Passenger actions are unavailable until a compatible PassengerJobs runtime is loaded."); return; }
         GUILayout.Label("Route | origin | destination:"); GUILayout.BeginHorizontal(); passengerRouteId = GUILayout.TextField(passengerRouteId, 24); passengerOrigin = GUILayout.TextField(passengerOrigin, 20); passengerDestination = GUILayout.TextField(passengerDestination, 20); GUILayout.EndHorizontal();
         GUILayout.Label("Initial demand | maximum | growth/interval | desired frequency | fare/passenger | late penalty/tick:"); GUILayout.BeginHorizontal(); passengerDemand = GUILayout.TextField(passengerDemand, 8); passengerMaximumDemand = GUILayout.TextField(passengerMaximumDemand, 8); passengerDemandGrowth = GUILayout.TextField(passengerDemandGrowth, 8); passengerFrequency = GUILayout.TextField(passengerFrequency, 8); passengerFare = GUILayout.TextField(passengerFare, 10); passengerLatePenalty = GUILayout.TextField(passengerLatePenalty, 10); GUILayout.EndHorizontal();
         if (!snapshot.PassengerRoutes.Any(x => x.RouteId == passengerRouteId) && GUILayout.Button("Configure passenger route demand")) ConfigurePassengerRoute(entry);
@@ -1242,7 +1248,21 @@ public static class Main
 
     private static void ReservePassengerService(UnityModManager.ModEntry entry, bool forCompany)
     {
-        var correlation = Guid.NewGuid().ToString("N"); try { RequireHostAuthority(); if (!int.TryParse(passengerCapacity, out var capacity) || !long.TryParse(passengerJourneyTicks, out var journey)) throw new InvalidOperationException("Passenger capacity or journey duration is invalid."); var now = runtimeStateProvider!.Current!.LeaseClock.ActiveTick; var contract = runtimeStateProvider.ReserveLocalPassengerService("passenger-reserve:" + correlation, "passenger:" + correlation, passengerRouteId, passengerJobId, SelectedOutboundAssetIds(runtimeStateProvider.Current), forCompany, capacity, now, checked(now + journey), runtimeRoleDetector!, new ManualMissionCompletionPort()); selectedPassengerContractId = contract.ContractId; if (!SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance)) throw new InvalidOperationException("Passenger service could not be staged in SaveGameData."); status = "Passenger service reserved: " + contract.BookedPassengers + " passenger(s)."; entry.Logger.Log("[correlation=" + correlation + "] [event=passenger-service-reserved] contract=" + contract.ContractId + ", job=" + contract.PassengerJobId + ", route=" + contract.RouteId + ", operator=" + contract.Operator.Key + ", assets=" + string.Join(",", contract.AssetIds) + ", booked=" + contract.BookedPassengers + ", capacity=" + contract.Capacity + ", quoteMax=" + contract.MaximumQuotedRevenue); } catch (Exception exception) { status = "Passenger service reservation refused: " + exception.Message; entry.Logger.Error("[correlation=" + correlation + "] [event=passenger-service-reserve-refused] " + exception); }
+        var correlation = Guid.NewGuid().ToString("N"); try { RequireHostAuthority(); RequirePassengerJobsJob(passengerJobId); if (!int.TryParse(passengerCapacity, out var capacity) || !long.TryParse(passengerJourneyTicks, out var journey)) throw new InvalidOperationException("Passenger capacity or journey duration is invalid."); var now = runtimeStateProvider!.Current!.LeaseClock.ActiveTick; var contract = runtimeStateProvider.ReserveLocalPassengerService("passenger-reserve:" + correlation, "passenger:" + correlation, passengerRouteId, passengerJobId, SelectedOutboundAssetIds(runtimeStateProvider.Current), forCompany, capacity, now, checked(now + journey), runtimeRoleDetector!, new ManualMissionCompletionPort()); selectedPassengerContractId = contract.ContractId; if (!SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance)) throw new InvalidOperationException("Passenger service could not be staged in SaveGameData."); status = "Passenger service reserved: " + contract.BookedPassengers + " passenger(s)."; entry.Logger.Log("[correlation=" + correlation + "] [event=passenger-service-reserved] contract=" + contract.ContractId + ", job=" + contract.PassengerJobId + ", route=" + contract.RouteId + ", operator=" + contract.Operator.Key + ", assets=" + string.Join(",", contract.AssetIds) + ", booked=" + contract.BookedPassengers + ", capacity=" + contract.Capacity + ", quoteMax=" + contract.MaximumQuotedRevenue); } catch (Exception exception) { status = "Passenger service reservation refused: " + exception.Message; entry.Logger.Error("[correlation=" + correlation + "] [event=passenger-service-reserve-refused] " + exception); }
+    }
+
+    private static void RequirePassengerJobsJob(string jobId)
+    {
+        var passengerJobsMod = UnityModManager.FindMod("PassengerJobs");
+        var bridge = new PassengerJobsRuntimeBridge(passengerJobsMod?.Info?.Version, passengerJobsMod?.Assembly);
+        if (!bridge.Status.IsAvailable) throw new InvalidOperationException("PassengerJobs bridge unavailable: " + bridge.Status.Code);
+        var job = JobsManager.Instance.currentJobs.FirstOrDefault(x => string.Equals(x.ID, jobId, StringComparison.Ordinal));
+        if (job == null)
+        {
+            var allJobs = AccessTools.Field(typeof(JobsManager), "allJobs")?.GetValue(JobsManager.Instance) as IEnumerable<Job>;
+            job = allJobs?.FirstOrDefault(x => string.Equals(x.ID, jobId, StringComparison.Ordinal));
+        }
+        if (job == null || !bridge.IsPassengerJob(job)) throw new InvalidOperationException("The selected ID is not a loaded PassengerJobs mission.");
     }
 
     private static void StartPassengerService(UnityModManager.ModEntry entry)

@@ -23,6 +23,7 @@
     <ProjectReference Include="..\BDVM.Market\BDVM.Market.csproj" />
     <ProjectReference Include="..\BDVM.Operations\BDVM.Operations.csproj" />
     <ProjectReference Include="..\BDVM.Passengers\BDVM.Passengers.csproj" />
+    <ProjectReference Include="..\BDVM.PassengerJobsBridge\BDVM.PassengerJobsBridge.csproj" />
     <ProjectReference Include="..\BDVM.MultiplayerBridge\BDVM.MultiplayerBridge.csproj" />
   </ItemGroup>
   <ItemGroup>
