@@ -329,7 +329,7 @@ public static class Main
         if (runtimeSettings.EnableWalletBridge)
             TrySynchronizeHostWallet(entry, "world-load");
         SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance);
-        status = "BDVM 2.3.0 ready for " + player.PlayerId + ".";
+        status = "BDVM 0.3.0 beta ready for " + player.PlayerId + ".";
         entry.Logger.Log("[correlation=runtime-bootstrap] Runtime state ready; player=" + player.PlayerId + ", legacyBalancePolicy=host-keeps-existing-balance, walletBridge=" + runtimeSettings.EnableWalletBridge + ", transfers=" + runtimeSettings.EnableCompanyTransfers + ", acquisition=" + runtimeSettings.EnableVehicleAcquisition + ".");
         entry.Logger.Log("[correlation=wallet-migration] [event=wallet-migration-policy] policy=host-keeps-existing-balance-v1, player=" + player.PlayerId + ", observedVanillaBalance=" + legacyBalance + ", remotePlayerInitialBalance=0");
         if (runtimeSettings.VerboseLogging)
@@ -361,7 +361,7 @@ public static class Main
 
     private static void DrawCompanyPanel(UnityModManager.ModEntry entry)
     {
-        GUILayout.Label("BDVM 2.3.0 — modular economy build; strict rolling-stock population policy available");
+        GUILayout.Label("BDVM 0.3.0 beta — modular economy build; strict rolling-stock population policy available");
         GUILayout.Label("SaveGameData hook: " + (SaveGameRuntimeHook.Enabled ? "enabled" : "disabled"));
         GUILayout.Label("World population: " + UnityWorldPopulationControl.State + " / " + UnityWorldPopulationControl.ResultCode);
         GUILayout.Label("Read-only output: " + Path.Combine(entry.Path, "diagnostics"));
@@ -1670,7 +1670,7 @@ public static class Main
         RequireHostAuthority(); var snapshot = runtimeStateProvider?.Current ?? throw new InvalidOperationException("BDVM career state is unavailable."); var playerId = runtimeStateProvider!.LocalPlayerId!;
         var payload = new
         {
-            schema = "bdvm.remote-dispatch", schemaVersion = 2, release = "2.3.0", transportIdentity, authorityActor = playerId,
+            schema = "bdvm.remote-dispatch", schemaVersion = 2, release = "0.3.0-beta", transportIdentity, authorityActor = playerId,
             supportedIntents = new[] { "fleet.set-state", "fleet.rename", "company.create", "company.apply", "company.invite", "company.decide-application", "company.respond-invitation", "company.leave", "company.policy", "company.permission", "company.transfer-leadership", "wallet.transfer", "market.purchase", "initial-delivery.place", "assignment.cancel" },
             wallets = snapshot.Economy.Wallets.Select(x => new { account = x.Account.Key, x.Balance, x.Version }),
             companies = snapshot.Economy.Companies.Select(x => new { x.CompanyId, x.Name, x.LeaderId, members = x.Members.ToArray(), delegatedPermissions = x.DelegatedPermissions.ToDictionary(p => p.Key, p => p.Value.Select(v => v.ToString()).ToArray()), x.MembershipPolicy, x.Liquidating, x.Version }),

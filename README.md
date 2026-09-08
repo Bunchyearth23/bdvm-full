@@ -7,11 +7,11 @@
 | Property | Value |
 | --- | --- |
 | Module kind | Integration bundle |
-| Manifest version | 2.3.0 |
+| Manifest version | 0.3.0 |
 | Target framework | .NET Framework 4.8 (`net48`) |
 | Mod loader | Unity Mod Manager 0.27.3 or compatible |
 | Current declared requirements | `Multiplayer`, `SelfShunt`, `PassengerJobs`, `RemoteDispatchLive` |
-| Release state | Development build; packaging and compatibility matrix are not final |
+| Release state | Beta development candidate; the first stable release will be 1.0.0 |
 
 ## Included modules
 
@@ -21,7 +21,7 @@ Feature domain and integration files remain owned by their module repositories. 
 
 ## Responsibilities and current capabilities
 
-The 2.3.0 composition binds `BDVM.Management` snapshots and intents to the authoritative runtime through a transport-independent adapter. Company, wallet, fleet, market, delivery, leasing, assignment, passenger, financing, yard and available industrial actions execute on the host and use the existing save boundary.
+The 0.3.0 composition binds `BDVM.Management` snapshots and intents to the authoritative runtime through a transport-independent adapter. Company, wallet, fleet, market, delivery, leasing, assignment, passenger, financing, yard and available industrial actions execute on the host and use the existing save boundary.
 
 - Initialize host-authoritative player, company and wallet state from the loaded career.
 - Persist BDVM checkpoints through the Derail Valley save hook.
@@ -81,6 +81,19 @@ Validate against a disposable save until persistence compatibility is formally r
 ## Installation
 
 No final package is published yet. For a development install, use the output prepared by the workspace packaging process and keep the compatible Multiplayer, Remote Dispatch and SelfShunt forks aligned with the tested revisions. Do not combine unmatched module DLLs from different commits.
+
+## Manual beta release
+
+The `Build beta release` GitHub Actions workflow is manual-only. It requires a
+private self-hosted Windows runner labelled `bdvm-release` with Derail Valley
+installed, because the game assemblies cannot be redistributed to GitHub-hosted
+runners. The operator supplies a tag matching `v0.x.y-beta.n`; any stable or
+post-1.0 tag is refused. The workflow checks out the complete module graph and
+the four integration forks, builds the required APIs and bundle, records every
+source commit in `provenance.json`, publishes SHA-256 checksums and always marks
+the GitHub release as a prerelease.
+
+The first stable suite release remains reserved for `1.0.0`.
 
 ## Upstream integrations and attribution
 

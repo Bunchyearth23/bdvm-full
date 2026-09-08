@@ -1,0 +1,130 @@
+name: Build beta release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Beta tag, for example v0.3.0-beta.1
+        required: true
+        type: string
+      game_dir:
+        description: Derail Valley directory on the self-hosted runner
+        required: true
+        default: D:\Steam\steamapps\common\Derail Valley
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bdvm-beta-release
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: [self-hosted, Windows, X64, bdvm-release]
+    steps:
+      - name: Validate beta request
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          GAME_DIR: ${{ inputs.game_dir }}
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v0\.\d+\.\d+-beta\.\d+$') {
+            throw 'release_tag must match v0.x.y-beta.n; stable tags are refused by this workflow.'
+          }
+          if (-not (Test-Path -LiteralPath "$env:GAME_DIR\DerailValley_Data\Managed\Assembly-CSharp.dll")) {
+            throw "Derail Valley managed assemblies were not found under $env:GAME_DIR."
+          }
+
+      - uses: actions/checkout@v4
+        with:
+          path: dv-company/src/BDVM.Full
+
+      - name: Checkout suite and integration forks
+        shell: pwsh
+        run: |
+          $repositories = [ordered]@{
+            'dv-company/src/BDVM.Common' = 'bdvm-common'
+            'dv-company/src/BDVM.Companies' = 'bdvm-companies'
+            'dv-company/src/BDVM.Core' = 'bdvm-core'
+            'dv-company/src/BDVM.Dispatch' = 'bdvm-dispatch'
+            'dv-company/src/BDVM.Fleet' = 'bdvm-fleet'
+            'dv-company/src/BDVM.Management' = 'bdvm-management'
+            'dv-company/src/BDVM.Market' = 'bdvm-market'
+            'dv-company/src/BDVM.MultiplayerBridge' = 'bdvm-multiplayer-bridge'
+            'dv-company/src/BDVM.Operations' = 'bdvm-operations'
+            'dv-company/src/BDVM.PassengerJobsBridge' = 'bdvm-passengerjobs-bridge'
+            'dv-company/src/BDVM.Passengers' = 'bdvm-passengers'
+            'dv-company/src/BDVM.SelfShuntBridge' = 'bdvm-selfshunt-bridge'
+            'dv-company/src/BDVM.Web' = 'bdvm-web'
+          }
+          foreach ($entry in $repositories.GetEnumerator()) {
+            git clone --depth 1 "https://github.com/Bunchyearth23/$($entry.Value).git" $entry.Key
+            if ($LASTEXITCODE -ne 0) { throw "Checkout failed: $($entry.Value)" }
+          }
+          git clone --depth 1 --branch bdvm-integration https://github.com/Bunchyearth23/dv-multiplayer.git dv-multiplayer-beta
+          if ($LASTEXITCODE -ne 0) { throw 'Multiplayer checkout failed.' }
+          git clone --depth 1 --branch bdvm-integration https://github.com/Bunchyearth23/DVPassengerJobs.git dv-passengerjobs-upstream
+          if ($LASTEXITCODE -ne 0) { throw 'PassengerJobs checkout failed.' }
+          git clone --depth 1 --branch dvcompany-integration https://github.com/Bunchyearth23/DV-SelfShunter.git dv-selfshunt-fork
+          if ($LASTEXITCODE -ne 0) { throw 'SelfShunt checkout failed.' }
+          git clone --depth 1 --branch bdvm-integration https://github.com/Bunchyearth23/dv-remote-dispatch.git dv-remote-dispatch
+          if ($LASTEXITCODE -ne 0) { throw 'Remote Dispatch checkout failed.' }
+
+      - name: Build integration APIs and BDVM Full
+        shell: pwsh
+        env:
+          GAME_DIR: ${{ inputs.game_dir }}
+        run: |
+          dotnet build dv-multiplayer-beta/MultiplayerAPI/MultiplayerAPI.csproj -c Release -p:GameDir="$env:GAME_DIR" -p:SkipMultiplayerPostBuild=true
+          if ($LASTEXITCODE -ne 0) { throw 'MultiplayerAPI build failed.' }
+          dotnet build dv-passengerjobs-upstream/PassengerJobs.API/PassengerJobs.API.csproj -c Release -p:GameDir="$env:GAME_DIR"
+          if ($LASTEXITCODE -ne 0) { throw 'PassengerJobs.API build failed.' }
+          dotnet build dv-selfshunt-fork/SS/SelfShunt.csproj -c Release -p:GameDir="$env:GAME_DIR"
+          if ($LASTEXITCODE -ne 0) { throw 'SelfShunt build failed.' }
+          dotnet build dv-company/src/BDVM.Full/BDVM.Full.csproj -c Release -p:GameDir="$env:GAME_DIR"
+          if ($LASTEXITCODE -ne 0) { throw 'BDVM.Full build failed.' }
+
+      - name: Validate and package beta
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          $manifest = Get-Content dv-company/src/BDVM.Full/module.json -Raw | ConvertFrom-Json
+          if ($manifest.version -notmatch '^0\.\d+\.\d+$') { throw 'BDVM.Full manifest must remain pre-1.0 in the beta workflow.' }
+          $stage = Join-Path $env:RUNNER_TEMP 'BDVM.Full'
+          $release = Join-Path $env:GITHUB_WORKSPACE 'release'
+          New-Item -ItemType Directory -Force -Path $stage, $release | Out-Null
+          Copy-Item dv-company/src/BDVM.Full/bin/Release/net48/*.dll $stage
+          Copy-Item dv-company/src/BDVM.Full/info.json, dv-company/src/BDVM.Full/module.json, dv-company/src/BDVM.Full/README.md, dv-company/src/BDVM.Full/LICENSE, dv-company/src/BDVM.Full/NOTICE, dv-company/src/BDVM.Full/COMPATIBILITY.md $stage
+          $provenance = [ordered]@{
+            schemaVersion = 1
+            releaseTag = $env:RELEASE_TAG
+            releaseChannel = 'beta'
+            generatedAtUtc = [DateTime]::UtcNow.ToString('o')
+            repositories = [ordered]@{}
+          }
+          foreach ($path in @('dv-company/src/BDVM.Full','dv-company/src/BDVM.Common','dv-company/src/BDVM.Companies','dv-company/src/BDVM.Core','dv-company/src/BDVM.Dispatch','dv-company/src/BDVM.Fleet','dv-company/src/BDVM.Management','dv-company/src/BDVM.Market','dv-company/src/BDVM.MultiplayerBridge','dv-company/src/BDVM.Operations','dv-company/src/BDVM.PassengerJobsBridge','dv-company/src/BDVM.Passengers','dv-company/src/BDVM.SelfShuntBridge','dv-company/src/BDVM.Web','dv-multiplayer-beta','dv-passengerjobs-upstream','dv-selfshunt-fork','dv-remote-dispatch')) {
+            $provenance.repositories[$path] = (git -C $path rev-parse HEAD).Trim()
+          }
+          $provenance | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 (Join-Path $stage 'provenance.json')
+          $archive = Join-Path $release "BDVM-Full-$env:RELEASE_TAG.zip"
+          Compress-Archive -Path "$stage\*" -DestinationPath $archive -CompressionLevel Optimal
+          Get-FileHash -Algorithm SHA256 $archive | ForEach-Object { "$($_.Hash.ToLowerInvariant())  $([IO.Path]::GetFileName($_.Path))" } | Set-Content -Encoding ascii (Join-Path $release 'SHA256SUMS.txt')
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BDVM-${{ inputs.release_tag }}
+          path: release/*
+          if-no-files-found: error
+
+      - name: Publish GitHub beta prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          name: BDVM ${{ inputs.release_tag }}
+          prerelease: true
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: release/*

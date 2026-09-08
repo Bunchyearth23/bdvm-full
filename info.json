@@ -1,6 +1,6 @@
 {
   "Id": "BDVM.Full",
-  "Version": "2.3.0",
+  "Version": "0.3.0",
   "DisplayName": "BDVM - Full",
   "Author": "Bunchy (Bunchyearth23)",
   "EntryMethod": "BDVM.Main.Load",
