@@ -10,6 +10,8 @@ public sealed class InGameCompanyWindow : MonoBehaviour
     private Action? drawContents;
     private Action<string>? log;
     private Rect windowRect = new Rect(30f, 60f, 1100f, 760f);
+    private GUIStyle? opaqueWindowStyle;
+    private Texture2D? opaqueWindowBackground;
     private Vector2 scroll;
     private bool visible;
     private bool worldInputBlocked;
@@ -42,7 +44,31 @@ public sealed class InGameCompanyWindow : MonoBehaviour
         windowRect.height = Math.Min(760f, Math.Max(320f, Screen.height - 80f));
         windowRect.x = Mathf.Clamp(windowRect.x, 0f, Math.Max(0f, Screen.width - windowRect.width));
         windowRect.y = Mathf.Clamp(windowRect.y, 0f, Math.Max(0f, Screen.height - windowRect.height));
-        windowRect = GUI.Window(WindowId, windowRect, DrawWindow, "BDVM 0.3.0 beta");
+        EnsureOpaqueWindowStyle();
+        windowRect = GUI.Window(WindowId, windowRect, DrawWindow, "BDVM 0.3.0 beta", opaqueWindowStyle);
+    }
+
+    private void EnsureOpaqueWindowStyle()
+    {
+        if (opaqueWindowStyle != null) return;
+        opaqueWindowBackground = new Texture2D(1, 1, TextureFormat.RGBA32, false)
+        {
+            name = "BDVM Opaque Window Background",
+            hideFlags = HideFlags.HideAndDontSave
+        };
+        opaqueWindowBackground.SetPixel(0, 0, new Color(0.075f, 0.085f, 0.095f, 1f));
+        opaqueWindowBackground.Apply(false, true);
+
+        opaqueWindowStyle = new GUIStyle(GUI.skin.window);
+        opaqueWindowStyle.normal.background = opaqueWindowBackground;
+        opaqueWindowStyle.hover.background = opaqueWindowBackground;
+        opaqueWindowStyle.active.background = opaqueWindowBackground;
+        opaqueWindowStyle.focused.background = opaqueWindowBackground;
+        opaqueWindowStyle.onNormal.background = opaqueWindowBackground;
+        opaqueWindowStyle.onHover.background = opaqueWindowBackground;
+        opaqueWindowStyle.onActive.background = opaqueWindowBackground;
+        opaqueWindowStyle.onFocused.background = opaqueWindowBackground;
+        opaqueWindowStyle.border = new RectOffset(0, 0, 0, 0);
     }
 
     private void DrawWindow(int id)
@@ -84,5 +110,12 @@ public sealed class InGameCompanyWindow : MonoBehaviour
     {
         if (worldInputBlocked) SetWorldInputBlocked(false, "component-disabled");
         visible = false;
+    }
+
+    private void OnDestroy()
+    {
+        if (opaqueWindowBackground != null) Destroy(opaqueWindowBackground);
+        opaqueWindowBackground = null;
+        opaqueWindowStyle = null;
     }
 }
