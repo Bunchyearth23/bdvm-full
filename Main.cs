@@ -496,7 +496,7 @@ public static class Main
             var personal = runtimeStateProvider!.Current!.Economy.Wallets.Single(x => x.Account.Key == "Player:" + player.PlayerId);
             var before = personal.Balance;
             var releaseGuard = new UnityAssetReleaseGuard();
-            var result = runtimeStateProvider.DissolveCompanyFor("company-dissolve:" + correlation, player.PlayerId, company.CompanyId, debts, penalties, runtimeRoleDetector!, releaseGuard, new UnityExistingVehicleOwnershipAdapter(), new CompositeCompanyContractCancellationPort(new CompanyWorkflowCancellationPort(runtimeStateProvider.Current!, runtimeRoleDetector!), new OutboundLeaseCompanyContractCancellationPort(runtimeStateProvider.Current!, runtimeRoleDetector!, releaseGuard, new DeclaredOffSceneLeaseSimulationPort()), new FinancingCompanyContractCancellationPort(runtimeStateProvider.Current!, runtimeRoleDetector!)));
+            var result = runtimeStateProvider.DissolveCompanyFor("company-dissolve:" + correlation, player.PlayerId, company.CompanyId, debts, penalties, runtimeRoleDetector!, releaseGuard, new UnityExistingVehicleOwnershipAdapter(), new CompositeCompanyContractCancellationPort(new CompanyWorkflowCancellationPort(runtimeStateProvider.Current!, runtimeRoleDetector!), new OutboundLeaseCompanyContractCancellationPort(runtimeStateProvider.Current!, runtimeRoleDetector!, releaseGuard, new DeclaredOffSceneLeaseSimulationPort()), new FinancingCompanyContractCancellationPort(runtimeStateProvider.Current!, runtimeRoleDetector!)), new SaveGameLiquidationCheckpointPort(entry));
             if (!SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance)) throw new InvalidOperationException("Liquidation state could not be staged for save.");
             var after = runtimeStateProvider.Current!.Economy.Wallets.Single(x => x.Account.Key == "Player:" + player.PlayerId).Balance;
             if (result.State == CompanyLiquidationState.Succeeded && after > before) hostWallet.Credit(after - before);
@@ -523,7 +523,7 @@ public static class Main
             var wallet = snapshot.Economy.Wallets.Single(x => x.Account.Key == "Player:" + player.PlayerId);
             var before = wallet.Balance;
             var releaseGuard = new UnityAssetReleaseGuard();
-            var results = runtimeStateProvider!.ReconcilePendingCompanyLiquidations(runtimeRoleDetector!, releaseGuard, new UnityExistingVehicleOwnershipAdapter(), new CompositeCompanyContractCancellationPort(new CompanyWorkflowCancellationPort(runtimeStateProvider.Current!, runtimeRoleDetector!), new OutboundLeaseCompanyContractCancellationPort(runtimeStateProvider.Current!, runtimeRoleDetector!, releaseGuard, new DeclaredOffSceneLeaseSimulationPort()), new FinancingCompanyContractCancellationPort(runtimeStateProvider.Current!, runtimeRoleDetector!)));
+            var results = runtimeStateProvider!.ReconcilePendingCompanyLiquidations(runtimeRoleDetector!, releaseGuard, new UnityExistingVehicleOwnershipAdapter(), new CompositeCompanyContractCancellationPort(new CompanyWorkflowCancellationPort(runtimeStateProvider.Current!, runtimeRoleDetector!), new OutboundLeaseCompanyContractCancellationPort(runtimeStateProvider.Current!, runtimeRoleDetector!, releaseGuard, new DeclaredOffSceneLeaseSimulationPort()), new FinancingCompanyContractCancellationPort(runtimeStateProvider.Current!, runtimeRoleDetector!)), new SaveGameLiquidationCheckpointPort(entry));
             if (!SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance)) throw new InvalidOperationException("Liquidation recovery could not be staged for save.");
             var after = snapshot.Economy.Wallets.Single(x => x.Account.Key == "Player:" + player.PlayerId).Balance;
             if (after > before) hostWallet.Credit(after - before);
@@ -1596,5 +1596,18 @@ public static class Main
         public UmmTrace(UnityModManager.ModEntry entry) => this.entry = entry;
         public void Info(string correlationId, string message) => entry.Logger.Log($"[correlation={correlationId}] {message}");
         public void Error(string correlationId, string message, Exception exception) => entry.Logger.Error($"[correlation={correlationId}] {message}: {exception}");
+    }
+
+    private sealed class SaveGameLiquidationCheckpointPort : ICompanyLiquidationCheckpointPort
+    {
+        private readonly UnityModManager.ModEntry entry;
+        public SaveGameLiquidationCheckpointPort(UnityModManager.ModEntry entry) => this.entry = entry;
+
+        public bool TryCheckpoint(CompanyLiquidationRecord record, string phase)
+        {
+            var saved = SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance);
+            entry.Logger.Log("[correlation=" + record.CommandId + "] [event=company-liquidation-checkpoint] company=" + record.CompanyId + ", phase=" + phase + ", saved=" + saved + ", contractsCancelled=" + record.ContractsCancelled + ", ownershipCommitted=" + record.OwnershipCommitted + ", economyCommitted=" + record.EconomyCommitted);
+            return saved;
+        }
     }
 }
