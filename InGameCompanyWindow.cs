@@ -42,7 +42,7 @@ public sealed class InGameCompanyWindow : MonoBehaviour
         windowRect.height = Math.Min(760f, Math.Max(320f, Screen.height - 80f));
         windowRect.x = Mathf.Clamp(windowRect.x, 0f, Math.Max(0f, Screen.width - windowRect.width));
         windowRect.y = Mathf.Clamp(windowRect.y, 0f, Math.Max(0f, Screen.height - windowRect.height));
-        windowRect = GUI.Window(WindowId, windowRect, DrawWindow, "BDVM 2.0.0");
+        windowRect = GUI.Window(WindowId, windowRect, DrawWindow, "BDVM 2.1.0");
     }
 
     private void DrawWindow(int id)

@@ -7,7 +7,7 @@
 | Property | Value |
 | --- | --- |
 | Module kind | Integration bundle |
-| Manifest version | 2.0.0 |
+| Manifest version | 2.1.0 |
 | Target framework | .NET Framework 4.8 (`net48`) |
 | Mod loader | Unity Mod Manager 0.27.3 or compatible |
 | Current declared requirements | `Multiplayer`, `SelfShunt`, `PassengerJobs`, `RemoteDispatchLive` |
@@ -32,6 +32,7 @@ Feature domain and integration files remain owned by their module repositories. 
 - Adapt the current browser transport through the BDVM Remote Dispatch fork.
 - Adapt host-authoritative multiplayer protocol through the BDVM Multiplayer fork.
 - Coordinate competing generation through the authorized SelfShunt fork.
+- Optionally enforce the strict rolling-stock population policy at targeted vanilla, Multiplayer, SelfShunt and PassengerJobs generator boundaries.
 - Show the in-game management window with `F7`; the UI is intended for mouse mode and blocks world interaction while open.
 
 ## Boundaries and known limitations
@@ -91,6 +92,8 @@ Required upstream notices and attribution must remain present in redistributed b
 ## Compatibility
 
 Use modules, forks and API assemblies from the same tested release set. Checkpoint schemas, protocol versions, route identifiers and persistent asset IDs are compatibility boundaries; incompatible inputs must be refused rather than guessed. Until a release matrix is published, development builds should be tested on disposable saves and are not guaranteed to support downgrade.
+
+Strict population control is disabled by default. It requires the SaveGameData hook, an authoritative host, a new non-tutorial career or an existing save already carrying a BDVM checkpoint, and compatible SelfShunt and PassengerJobs generation controls. If any precondition fails, generator interception remains inactive and the refusal is logged; the runtime never applies a partial strict policy silently.
 
 ## License
 

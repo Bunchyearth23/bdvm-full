@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using BDVM.Adapters;
 using BDVM.Domain;
 using DV;
 using DV.ThingTypes;
@@ -43,6 +44,7 @@ internal sealed class UnityInitialDeliveryAdapter : IInitialDeliveryPort
     {
         lock (Gate)
         {
+            if (!UnityWorldPopulationControl.ShouldRun(WorldPopulationSource.PurchasedDelivery, "bdvm:UnityInitialDeliveryAdapter.Place")) return Refused("world-population-policy-refused");
             if (Completed.TryGetValue(operationId, out var known)) return InspectKnown(known);
             var preflight = Preflight(operationId + ":repeat", trackId, targetKind, definitionIds);
             if (preflight.Outcome != WorldOwnershipOutcome.Applied) return preflight;

@@ -150,6 +150,10 @@ public static class Main
         runtimeSettings = RuntimeSaveSettings.Load(
             Path.Combine(modEntry.Path, "runtime-settings.json"),
             message => modEntry.Logger.Warning("[correlation=save-settings] " + message));
+        var strictPopulationEnabled = runtimeSettings.EnableStrictWorldPopulation && runtimeSettings.EnableSaveGameDataHook;
+        UnityWorldPopulationControl.Configure(strictPopulationEnabled, runtimeSettings.WorldPopulationPolicy, roleDetector, message => modEntry.Logger.Log(message));
+        if (runtimeSettings.EnableStrictWorldPopulation && !runtimeSettings.EnableSaveGameDataHook)
+            modEntry.Logger.Error("[correlation=world-population] Strict population control refused because the SaveGameData hook is disabled.");
         UnityAssetCleanupProtection.Configure(runtimeSettings.EnableAssetLifecycle, () => runtimeStateProvider?.Current, roleDetector, message => modEntry.Logger.Log(message));
         modEntry.Logger.Log("[correlation=asset-lifecycle] Cleanup protection hook " + (runtimeSettings.EnableAssetLifecycle ? "enabled for exact BDVM CarGUID ownership/contract matches." : "disabled by feature flag."));
         if (runtimeSettings.EnableMultiplayerProtocol)
@@ -175,6 +179,8 @@ public static class Main
                 (message, exception) => modEntry.Logger.Error("[correlation=save-runtime] " + message + " " + exception));
             saveHarmony = new Harmony(modEntry.Info.Id + ".SaveGameData");
             saveHarmony.PatchAll();
+            if (strictPopulationEnabled)
+                modEntry.Logger.Warning("[correlation=world-population] Strict world population hooks installed; activation still requires an eligible non-tutorial BDVM career and authoritative external controls.");
             modEntry.Logger.Warning("[correlation=bootstrap] SaveGameData runtime hook ENABLED by explicit runtime-settings.json.");
         }
         else
@@ -305,7 +311,7 @@ public static class Main
         if (runtimeSettings.EnableWalletBridge)
             TrySynchronizeHostWallet(entry, "world-load");
         SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance);
-        status = "BDVM 2.0.0 ready for " + player.PlayerId + ".";
+        status = "BDVM 2.1.0 ready for " + player.PlayerId + ".";
         entry.Logger.Log("[correlation=runtime-bootstrap] Runtime state ready; player=" + player.PlayerId + ", legacyBalancePolicy=host-keeps-existing-balance, walletBridge=" + runtimeSettings.EnableWalletBridge + ", transfers=" + runtimeSettings.EnableCompanyTransfers + ", acquisition=" + runtimeSettings.EnableVehicleAcquisition + ".");
         entry.Logger.Log("[correlation=wallet-migration] [event=wallet-migration-policy] policy=host-keeps-existing-balance-v1, player=" + player.PlayerId + ", observedVanillaBalance=" + legacyBalance + ", remotePlayerInitialBalance=0");
         if (runtimeSettings.VerboseLogging)
@@ -337,8 +343,9 @@ public static class Main
 
     private static void DrawCompanyPanel(UnityModManager.ModEntry entry)
     {
-        GUILayout.Label("BDVM 2.0.0 — modular economy build; catalog ownership and one-shot depot delivery enabled");
+        GUILayout.Label("BDVM 2.1.0 — modular economy build; strict rolling-stock population policy available");
         GUILayout.Label("SaveGameData hook: " + (SaveGameRuntimeHook.Enabled ? "enabled" : "disabled"));
+        GUILayout.Label("World population: " + UnityWorldPopulationControl.State + " / " + UnityWorldPopulationControl.ResultCode);
         GUILayout.Label("Read-only output: " + Path.Combine(entry.Path, "diagnostics"));
         if (GUILayout.Button("Export authoritative host diagnostic"))
         {
@@ -1645,7 +1652,7 @@ public static class Main
         RequireHostAuthority(); var snapshot = runtimeStateProvider?.Current ?? throw new InvalidOperationException("BDVM career state is unavailable."); var playerId = runtimeStateProvider!.LocalPlayerId!;
         var payload = new
         {
-            schema = "bdvm.remote-dispatch", schemaVersion = 2, release = "2.0.0", transportIdentity, authorityActor = playerId,
+            schema = "bdvm.remote-dispatch", schemaVersion = 2, release = "2.1.0", transportIdentity, authorityActor = playerId,
             supportedIntents = new[] { "fleet.set-state", "fleet.rename", "company.create", "company.apply", "company.invite", "company.decide-application", "company.respond-invitation", "company.leave", "company.policy", "company.permission", "company.transfer-leadership", "wallet.transfer", "market.purchase", "initial-delivery.place", "assignment.cancel" },
             wallets = snapshot.Economy.Wallets.Select(x => new { account = x.Account.Key, x.Balance, x.Version }),
             companies = snapshot.Economy.Companies.Select(x => new { x.CompanyId, x.Name, x.LeaderId, members = x.Members.ToArray(), delegatedPermissions = x.DelegatedPermissions.ToDictionary(p => p.Key, p => p.Value.Select(v => v.ToString()).ToArray()), x.MembershipPolicy, x.Liquidating, x.Version }),
@@ -1664,6 +1671,7 @@ public static class Main
             passengers = new { enabled = runtimeSettings.EnablePassengerEconomy, routes = snapshot.PassengerRoutes.Select(x => new { x.RouteId, x.OriginId, x.DestinationId, x.DemandUnits, x.MaximumDemandUnits, x.DesiredFrequencyTicks, x.PunctualityBasisPoints, x.Version }), contracts = snapshot.PassengerContracts.Select(x => new { x.ContractId, x.RouteId, x.PassengerJobId, x.AssetIds, operatorRef = x.Operator.Key, x.Capacity, x.BookedPassengers, x.MaximumQuotedRevenue, x.ObservedVanillaRevenue, x.PunctualityPenalty, x.PaidRevenue, state = x.State.ToString(), x.Version }) },
             dynamicEconomy = new { enabled = runtimeSettings.EnableDynamicEconomy, metrics = snapshot.DynamicEconomy.Metrics.Select(x => new { x.CategoryId, x.SupplyRatio, x.DemandRatio, x.UtilizationRatio, x.LessorAvailabilityRatio, x.RawFactor, x.SmoothedFactor, x.CalculatedTick, x.Version }), profitability = snapshot.DynamicEconomy.Profitability.Select(x => new { x.AssetId, x.OperatingRevenue, x.OperatingCosts, x.NetOperatingResult, x.AcquisitionCash, x.CompletedServices, x.Version }) },
             assetLifecycle = new { enabled = runtimeSettings.EnableAssetLifecycle, cleanupProtectionAdapter = "CarVisitChecker.IsRecentlyVisited-exact-CarGUID-host-only", records = snapshot.AssetLifecycle.Records.Select(x => new { x.AssetId, status = x.Status.ToString(), protection = x.ProtectionStatus.ToString(), x.LastKnownMapRevision, x.LastKnownTrackId, x.Detail, x.Version }) },
+            worldPopulation = new { configured = runtimeSettings.EnableStrictWorldPopulation, runtimeState = UnityWorldPopulationControl.State.ToString(), UnityWorldPopulationControl.ResultCode, policyVersion = runtimeSettings.WorldPopulationPolicy?.SchemaVersion ?? 0, strict = runtimeSettings.WorldPopulationPolicy?.Strict ?? false },
             financing = new { enabled = runtimeSettings.EnableFinancing, pools = snapshot.Financing.Pools.Select(x => new { x.PoolId, x.AvailableCapital, x.InitialCapital, x.ReceivedPayments, x.WrittenOff, x.Version }), contracts = snapshot.Financing.Contracts.Select(x => new { x.ContractId, kind = x.Kind.ToString(), debtor = x.Debtor.Key, x.PrincipalLimit, x.ReservedCapital, x.OutstandingPrincipal, x.AccruedInterest, x.InterestBasisPoints, x.MinimumInstallment, x.IntervalTicks, x.NextDueTick, x.MaturityTick, x.GuaranteeAmount, x.HeldGuarantee, state = x.State.ToString(), x.Terms, x.Version }) },
             triageAssistance = new { enabled = runtimeSettings.EnableTriageAssistance, executionAdapter = "disabled-until-public-selfshunt-hook-is-proven", plans = snapshot.TriageAssistance.Plans.Select(x => new { x.PlanId, x.AssignmentId, level = x.Level.ToString(), x.AssetIds, x.OrderedTrackIds, state = x.State.ToString(), x.ResultCode, x.Version }) }
         };
