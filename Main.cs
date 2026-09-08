@@ -818,6 +818,7 @@ public static class Main
         var pending = snapshot.Market.Purchases.Count(x => x.State == MarketPurchaseState.ReconcileRequired);
         if (pending > 0 && GUILayout.Button("Reconcile legacy pending market purchases (" + pending + ")")) ReconcileFiniteMarket(entry);
         DrawInitialDeliveries(entry, snapshot);
+        if (runtimeSettings.EnableIndustrialPilot && GUILayout.Button("Create starter rolling-stock freight job")) CreateStarterFreightJob(entry);
         if (GUILayout.Button("Advance validation market clock by 100 ticks and expire due listings")) AdvanceFiniteMarketClock(entry);
     }
 
@@ -955,6 +956,22 @@ public static class Main
             foreach (var result in results) entry.Logger.Log("[correlation=" + correlation + "] [event=initial-delivery-reconcile] grant=" + result.GrantId + ", state=" + result.State + ", result=" + result.ResultCode);
         }
         catch (Exception exception) { status = "Initial delivery reconciliation refused: " + exception.Message; entry.Logger.Error("[correlation=" + correlation + "] [event=initial-delivery-reconcile-failed] " + exception); }
+    }
+
+    private static void CreateStarterFreightJob(UnityModManager.ModEntry entry)
+    {
+        var correlation = Guid.NewGuid().ToString("N");
+        try
+        {
+            RequireHostAuthority();
+            status = UnityStarterFreightJobAdapter.Create(runtimeStateProvider!.Current!, runtimeStateProvider.LocalPlayerId!);
+            entry.Logger.Log("[correlation=" + correlation + "] [event=starter-freight-job-created] " + status);
+        }
+        catch (Exception exception)
+        {
+            status = "Starter freight job refused: " + exception.Message;
+            entry.Logger.Error("[correlation=" + correlation + "] [event=starter-freight-job-refused] " + exception);
+        }
     }
 
     private static void DrawDynamicEconomy(UnityModManager.ModEntry entry, VehicleAcquisitionSnapshot snapshot)

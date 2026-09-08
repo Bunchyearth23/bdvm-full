@@ -7,6 +7,7 @@
     <RootNamespace>BDVM</RootNamespace>
     <GameDir Condition="'$(GameDir)' == ''">D:\Steam\steamapps\common\Derail Valley</GameDir>
     <LocalMultiplayerApi>$(MSBuildProjectDirectory)\..\..\..\dv-multiplayer-beta\MultiplayerAPI\bin\Release\net48\MultiplayerAPI.dll</LocalMultiplayerApi>
+    <LocalSelfShunt>$(MSBuildProjectDirectory)\..\..\..\dv-selfshunt-fork\SS\bin\Release\net48\SelfShunt.dll</LocalSelfShunt>
     <MultiplayerApiPath Condition="Exists('$(LocalMultiplayerApi)')">$(LocalMultiplayerApi)</MultiplayerApiPath>
     <MultiplayerApiPath Condition="'$(MultiplayerApiPath)' == ''">$(GameDir)\Mods\Multiplayer\MultiplayerAPI.dll</MultiplayerApiPath>
     <AssemblySearchPaths>$(AssemblySearchPaths);$(GameDir)\DerailValley_Data\Managed;$(GameDir)\DerailValley_Data\Managed\UnityModManager</AssemblySearchPaths>
@@ -59,5 +60,6 @@
     <Reference Include="Unity.TextMeshPro" Private="false" />
     <Reference Include="UnityModManager" HintPath="$(GameDir)\DerailValley_Data\Managed\UnityModManager\UnityModManager.dll" Private="false" />
     <Reference Include="MultiplayerAPI" HintPath="$(MultiplayerApiPath)" Private="false" />
+    <Reference Include="SelfShunt" HintPath="$(LocalSelfShunt)" Private="false" />
   </ItemGroup>
 </Project>

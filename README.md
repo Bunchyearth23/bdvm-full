@@ -28,6 +28,8 @@ The 0.3.0 composition binds `BDVM.Management` snapshots and intents to the autho
 
 Starter rolling stock is delivered with the native comms radio. Select **BDVM DELIVERY**, use the radio A/B buttons to choose the next owned vehicle, aim at an empty depot or service track in the current station, and press Use. The default DE2 and three flatcars are delivered one vehicle at a time, and every successful placement is persisted before it can be repeated.
 
+The beta validation interface can create one end-to-end starter freight job after the three delivered flatcars are placed together on a compatible warehouse track. It selects a real cargo and destination warehouse, uses the owned CarGUIDs in a persistent SelfShunt job chain, and relies on the game's normal booklet, loading machine, unloading machine and payment flow. It never creates replacement wagons.
+
 - Initialize host-authoritative player, company and wallet state from the loaded career.
 - Persist BDVM checkpoints through the Derail Valley save hook.
 - Manage company creation, membership, funds and economic diagnostics.
