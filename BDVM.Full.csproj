@@ -1,0 +1,56 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <AssemblyName>BDVM.Full</AssemblyName>
+    <RootNamespace>BDVM</RootNamespace>
+    <GameDir Condition="'$(GameDir)' == ''">D:\Steam\steamapps\common\Derail Valley</GameDir>
+    <LocalMultiplayerApi>$(MSBuildProjectDirectory)\..\..\..\dv-multiplayer-beta\MultiplayerAPI\bin\Release\net48\MultiplayerAPI.dll</LocalMultiplayerApi>
+    <MultiplayerApiPath Condition="Exists('$(LocalMultiplayerApi)')">$(LocalMultiplayerApi)</MultiplayerApiPath>
+    <MultiplayerApiPath Condition="'$(MultiplayerApiPath)' == ''">$(GameDir)\Mods\Multiplayer\MultiplayerAPI.dll</MultiplayerApiPath>
+    <AssemblySearchPaths>$(AssemblySearchPaths);$(GameDir)\DerailValley_Data\Managed;$(GameDir)\DerailValley_Data\Managed\UnityModManager</AssemblySearchPaths>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\BDVM.Common\BDVM.Common.csproj" />
+    <ProjectReference Include="..\BDVM.Core\BDVM.Core.csproj" />
+    <ProjectReference Include="..\BDVM.Web\BDVM.Web.csproj" />
+    <ProjectReference Include="..\BDVM.Dispatch\BDVM.Dispatch.csproj" />
+    <ProjectReference Include="..\BDVM.Management\BDVM.Management.csproj" />
+    <ProjectReference Include="..\BDVM.SelfShuntBridge\BDVM.SelfShuntBridge.csproj" />
+    <ProjectReference Include="..\BDVM.Companies\BDVM.Companies.csproj" />
+    <ProjectReference Include="..\BDVM.Fleet\BDVM.Fleet.csproj" />
+    <ProjectReference Include="..\BDVM.Market\BDVM.Market.csproj" />
+    <ProjectReference Include="..\BDVM.Operations\BDVM.Operations.csproj" />
+    <ProjectReference Include="..\BDVM.Passengers\BDVM.Passengers.csproj" />
+    <ProjectReference Include="..\BDVM.MultiplayerBridge\BDVM.MultiplayerBridge.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="..\BDVM.Core\Domain\*.cs" Link="Domain\Core\%(Filename)%(Extension)" />
+    <Compile Include="..\BDVM.Companies\Domain\*.cs" Link="Domain\Companies\%(Filename)%(Extension)" />
+    <Compile Include="..\BDVM.Fleet\Domain\*.cs" Link="Domain\Fleet\%(Filename)%(Extension)" />
+    <Compile Include="..\BDVM.Market\Domain\*.cs" Link="Domain\Market\%(Filename)%(Extension)" />
+    <Compile Include="..\BDVM.Operations\Domain\*.cs" Link="Domain\Operations\%(Filename)%(Extension)" />
+    <Compile Include="..\BDVM.Passengers\Domain\*.cs" Link="Domain\Passengers\%(Filename)%(Extension)" />
+    <Compile Include="..\BDVM.MultiplayerBridge\Domain\*.cs" Link="Domain\Multiplayer\%(Filename)%(Extension)" />
+    <Compile Include="..\BDVM.Core\Integration\*.cs" Link="Integration\Core\%(Filename)%(Extension)" />
+    <Compile Include="..\BDVM.Dispatch\Integration\*.cs" Link="Integration\Dispatch\%(Filename)%(Extension)" />
+    <Compile Include="..\BDVM.MultiplayerBridge\Integration\*.cs" Link="Integration\Multiplayer\%(Filename)%(Extension)" />
+  </ItemGroup>
+  <ItemGroup>
+    <Reference Include="Assembly-CSharp" Private="false" />
+    <Reference Include="0Harmony" HintPath="$(GameDir)\DerailValley_Data\Managed\UnityModManager\0Harmony.dll" Private="false" />
+    <Reference Include="DV.ThingTypes" Private="false" />
+    <Reference Include="DV.Inventory" Private="false" />
+    <Reference Include="DV.Interaction" Private="false" />
+    <Reference Include="DV.Common" Private="false" />
+    <Reference Include="DV.UserManagement" Private="false" />
+    <Reference Include="DV.Utils" Private="false" />
+    <Reference Include="Newtonsoft.Json" HintPath="$(GameDir)\DerailValley_Data\Managed\Newtonsoft.Json.dll" Private="false" />
+    <Reference Include="UnityEngine.CoreModule" Private="false" />
+    <Reference Include="UnityEngine.IMGUIModule" Private="false" />
+    <Reference Include="UnityEngine.InputLegacyModule" Private="false" />
+    <Reference Include="UnityModManager" HintPath="$(GameDir)\DerailValley_Data\Managed\UnityModManager\UnityModManager.dll" Private="false" />
+    <Reference Include="MultiplayerAPI" HintPath="$(MultiplayerApiPath)" Private="false" />
+  </ItemGroup>
+</Project>

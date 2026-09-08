@@ -1,0 +1,9 @@
+{
+  "Id": "BDVM.Full",
+  "Version": "2.0.0",
+  "DisplayName": "BDVM - Full",
+  "Author": "Arnaud",
+  "EntryMethod": "BDVM.Main.Load",
+  "ManagerVersion": "0.27.3",
+  "Requirements": [ "Multiplayer", "SelfShunt" ]
+}
