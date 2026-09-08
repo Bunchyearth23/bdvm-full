@@ -1,5 +1,8 @@
 # BDVM - Full
 
+**BDVM** stands for **Bunchy's Derail Valley Mods**, the common banner for this
+modular Derail Valley project.
+
 `BDVM.Full` is the current installable Unity Mod Manager composition of the BDVM project. It wires the modular economy, fleet, operations, web features and optional-in-architecture bridges into one Derail Valley entry point while standalone module packages are still being prepared.
 
 ## Status
