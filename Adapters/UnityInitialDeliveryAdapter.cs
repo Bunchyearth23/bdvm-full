@@ -105,7 +105,8 @@ internal sealed class UnityInitialDeliveryAdapter : IInitialDeliveryPort
         var result = new List<TrainCarLivery>();
         foreach (var id in definitionIds)
         {
-            var matches = Globals.G.Types.Liveries.Where(x => x != null && string.Equals(x.id, id, StringComparison.Ordinal)).ToArray();
+            var runtimeId = string.Equals(id, "CarFlatcar", StringComparison.Ordinal) ? "FlatbedEmpty" : id;
+            var matches = Globals.G.Types.Liveries.Where(x => x != null && string.Equals(x.id, runtimeId, StringComparison.Ordinal)).ToArray();
             if (matches.Length != 1 || matches[0].prefab == null) throw new InvalidOperationException(matches.Length == 0 ? "livery-not-found:" + id : "livery-identity-ambiguous:" + id);
             result.Add(matches[0]);
         }

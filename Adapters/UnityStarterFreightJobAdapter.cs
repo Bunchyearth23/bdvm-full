@@ -24,7 +24,7 @@ internal static class UnityStarterFreightJobAdapter
         if (existing != null) return "Job " + existing.ID + " is already available.";
 
         var owned = snapshot.Ownership.Where(x => x.Owner.Kind == AssetOwnerKind.Player && x.Owner.OwnerId == playerId).Select(x => x.AssetId).ToHashSet(StringComparer.Ordinal);
-        var guids = snapshot.Assets.Assets.Where(x => owned.Contains(x.AssetId) && x.DefinitionId == "CarFlatcar" && x.GameLink.State == PersistentLinkState.Resolved && !string.IsNullOrWhiteSpace(x.GameLink.Value))
+        var guids = snapshot.Assets.Assets.Where(x => owned.Contains(x.AssetId) && (x.DefinitionId == "CarFlatcar" || x.DefinitionId == "FlatbedEmpty") && x.GameLink.State == PersistentLinkState.Resolved && !string.IsNullOrWhiteSpace(x.GameLink.Value))
             .Select(x => x.GameLink.Value!).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var trainCars = CarSpawner.Instance.AllCars.Where(x => x != null && guids.Contains(x.CarGUID)).ToArray();
         if (trainCars.Length < 3 || trainCars.Any(x => x.logicCar == null)) throw new InvalidOperationException("Deliver all three starter flatcars before creating the freight job.");
