@@ -6,6 +6,7 @@ using BDVM.Adapters;
 using BDVM.Domain;
 using BDVM.Management;
 using BDVM.PassengerJobsBridge;
+using BDVM.SelfShuntBridge;
 using BDVM.Web;
 using DV.Logic.Job;
 using HarmonyLib;
@@ -1698,6 +1699,14 @@ public static class Main
 
         if (snapshot != null)
         {
+            Check("all runtime feature flags are enabled", () =>
+            {
+                var disabled = typeof(RuntimeSaveSettings).GetProperties()
+                    .Where(x => x.Name.StartsWith("Enable", StringComparison.Ordinal) && x.PropertyType == typeof(bool) && !(bool)x.GetValue(runtimeSettings, null))
+                    .Select(x => x.Name)
+                    .ToArray();
+                if (disabled.Length > 0) throw new InvalidOperationException("Disabled: " + string.Join(", ", disabled));
+            });
             Check("authoritative economy role", () =>
             {
                 if (!NetworkAuthorityPolicy.CanExecuteEconomy(runtimeRoleDetector!.Detect(), out var reason))
@@ -1718,6 +1727,61 @@ public static class Main
             Check("dedicated authority invariants", () => DedicatedAuthorityValidation.Validate(snapshot.DedicatedAuthority));
             Check("triage assistance invariants", () => TriageAssistanceValidation.Validate(snapshot.TriageAssistance, snapshot));
             Check("world population policy invariants", () => WorldPopulationPolicyEngine.Validate(runtimeSettings.WorldPopulationPolicy));
+            Check("strict rolling-stock control is active", () =>
+            {
+                if (UnityWorldPopulationControl.State != WorldPopulationRuntimeState.Active)
+                    throw new InvalidOperationException(UnityWorldPopulationControl.State + " / " + UnityWorldPopulationControl.ResultCode);
+            });
+            Check("economic rolling-stock spawn sources are denied", () =>
+            {
+                if (UnityWorldPopulationControl.ShouldRun(WorldPopulationSource.NaturalLocomotive, "validation:natural-locomotive")) throw new InvalidOperationException("Natural locomotives are still allowed.");
+                if (UnityWorldPopulationControl.ShouldRun(WorldPopulationSource.ContractProvidedVehicle, "validation:contract-rolling-stock")) throw new InvalidOperationException("Contract-provided rolling stock is still allowed.");
+                if (UnityWorldPopulationControl.ShouldRun(WorldPopulationSource.Unknown, "validation:unknown-spawn")) throw new InvalidOperationException("Unknown spawn sources are still allowed.");
+            });
+            Check("authorized delivery and external traffic remain allowed", () =>
+            {
+                if (!UnityWorldPopulationControl.ShouldRun(WorldPopulationSource.PurchasedDelivery, "validation:purchased-delivery")) throw new InvalidOperationException("Purchased delivery is blocked.");
+                if (!UnityWorldPopulationControl.ShouldRun(WorldPopulationSource.StarterDelivery, "validation:starter-delivery")) throw new InvalidOperationException("Starter delivery is blocked.");
+                if (!UnityWorldPopulationControl.ShouldRun(WorldPopulationSource.ExternalTraffic, "validation:external-traffic")) throw new InvalidOperationException("External traffic is blocked.");
+            });
+            Check("physical rolling-stock inventory is observable", () =>
+            {
+                var count = CarSpawner.Instance?.AllCars?.Count ?? throw new InvalidOperationException("CarSpawner inventory is unavailable.");
+                lines.Add("INFO | physical rolling stock at validation start | " + count);
+            });
+            Check("SelfShunt strict-generation bridge is available", () =>
+            {
+                if (!SelfShuntBridgeLocator.TryCreate(out _, out var code)) throw new InvalidOperationException(code);
+            });
+            Check("Passenger Jobs runtime bridge is available", () =>
+            {
+                var passengerMod = UnityModManager.FindMod("PassengerJobs");
+                var bridge = new PassengerJobsRuntimeBridge(passengerMod?.Info?.Version, passengerMod?.Assembly);
+                if (!bridge.Status.IsAvailable) throw new InvalidOperationException(bridge.Status.Code);
+            });
+            Check("Multiplayer API runtime is loaded", () =>
+            {
+                if (MultiplayerAPI.Instance == null) throw new InvalidOperationException("Multiplayer API instance is unavailable.");
+            });
+            Check("industrial production advances, backpressures and spawns no rolling stock", () =>
+            {
+                var clone = VehicleAcquisitionPersistence.Deserialize(VehicleAcquisitionPersistence.Serialize(snapshot), snapshot.CheckpointId);
+                var facility = "DEV-PRODUCTION-" + Guid.NewGuid().ToString("N");
+                clone.IndustrialStocks.Add(new IndustrialStock { FacilityId = facility, CargoId = "Input", OnHand = 10m, Capacity = 10m });
+                clone.IndustrialStocks.Add(new IndustrialStock { FacilityId = facility, CargoId = "Output", OnHand = 0m, Capacity = 1m });
+                clone.IndustrialRecipes.Add(new IndustrialRecipe { RecipeId = facility, FacilityId = facility, InputCargoId = "Input", InputQuantity = 2m, OutputCargoId = "Output", OutputQuantity = 1m, CadenceTicks = 10, MaximumBacklogCycles = 3 });
+                var assetCount = clone.Assets.Assets.Count;
+                var fleetCount = clone.Fleet.Count;
+                var engine = new IndustrialEconomyEngine(clone, runtimeRoleDetector!, new DisabledIndustrialExecutionPort());
+                var first = engine.AdvanceProduction("dev-production-first:" + correlation, facility, 20);
+                var recipe = clone.IndustrialRecipes.Single(x => x.RecipeId == facility);
+                if (first != 1 || recipe.PendingCycles != 1) throw new InvalidOperationException("Production backpressure was not preserved.");
+                clone.IndustrialStocks.Single(x => x.FacilityId == facility && x.CargoId == "Output").OnHand = 0m;
+                var second = engine.AdvanceProduction("dev-production-second:" + correlation, facility, 20);
+                if (second != 1 || recipe.PendingCycles != 0) throw new InvalidOperationException("Pending production did not resume.");
+                if (clone.Assets.Assets.Count != assetCount || clone.Fleet.Count != fleetCount) throw new InvalidOperationException("Production created rolling stock.");
+                IndustrialEconomyValidation.Validate(clone);
+            });
             Check("save serialization round trip", () =>
             {
                 var serialized = VehicleAcquisitionPersistence.Serialize(snapshot);
