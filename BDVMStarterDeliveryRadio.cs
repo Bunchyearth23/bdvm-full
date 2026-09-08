@@ -31,7 +31,7 @@ internal sealed class BDVMStarterDeliveryRadio : MonoBehaviour, ICommsRadioMode
     private RailTrack[] eligibleTracks = Array.Empty<RailTrack>();
     private float nextTargetUpdate;
 
-    public ButtonBehaviourType ButtonBehaviour { get; private set; } = ButtonBehaviourType.Override;
+    public ButtonBehaviourType ButtonBehaviour { get; private set; } = ButtonBehaviourType.Regular;
     public Color GetLaserBeamColor() => new Color(0.15f, 0.8f, 1f);
     public void OverrideSignalOrigin(Transform origin) => signalOrigin = origin;
 
@@ -63,13 +63,14 @@ internal sealed class BDVMStarterDeliveryRadio : MonoBehaviour, ICommsRadioMode
         selectedIndex = 0;
         placementLocked = false;
         withTrackDirection = true;
+        ButtonBehaviour = ButtonBehaviourType.Regular;
         eligibleTracks = (RailTrackRegistry.Instance?.AllTracks ?? Enumerable.Empty<RailTrack>()).Where(IsEligible).ToArray();
         nextTargetUpdate = 0f;
         UpdateSelectedBounds();
         Refresh();
         Debug.Log($"[BDVM.Full] [correlation=starter-delivery-radio] [event=mode-enabled] eligibleTracks={eligibleTracks.Length}");
     }
-    public void Disable() { pointedTrack = null; placementLocked = false; canSpawn = false; eligibleTracks = Array.Empty<RailTrack>(); highlighter?.TurnOff(); lcdArrow?.TurnOff(); }
+    public void Disable() { pointedTrack = null; placementLocked = false; canSpawn = false; ButtonBehaviour = ButtonBehaviourType.Regular; eligibleTracks = Array.Empty<RailTrack>(); highlighter?.TurnOff(); lcdArrow?.TurnOff(); }
     private void OnDestroy() { highlighter?.Destroy(); highlighter = null; }
     public void SetStartingDisplay() => Refresh();
     public void OnUpdate()
@@ -87,28 +88,19 @@ internal sealed class BDVMStarterDeliveryRadio : MonoBehaviour, ICommsRadioMode
         var grants = Available();
         if (grants.Count == 0) { Refresh("No delivery pending."); return; }
         if (!canSpawn || pointedTrack == null) { Refresh("No safe depot/service placement here."); return; }
-        if (!placementLocked) { placementLocked = true; Refresh("A/B reverses direction; Use delivers."); return; }
+        if (!placementLocked) { placementLocked = true; ButtonBehaviour = ButtonBehaviourType.Override; Refresh("A/B reverses direction; Use delivers."); return; }
         if (selectedIndex >= grants.Count) selectedIndex = 0;
         var result = deliver(pointedTrack, pointedSpan, withTrackDirection, pointedKind, grants[selectedIndex]);
         placementLocked = false;
         withTrackDirection = true;
+        ButtonBehaviour = ButtonBehaviourType.Regular;
         UpdateSelectedBounds();
         Refresh(result);
     }
 
-    public bool ButtonACustomAction() => placementLocked ? Reverse() : Move(-1);
-    public bool ButtonBCustomAction() => placementLocked ? Reverse() : Move(1);
+    public bool ButtonACustomAction() => placementLocked && Reverse();
+    public bool ButtonBCustomAction() => placementLocked && Reverse();
     private bool Reverse() { if (!canSpawn) return false; withTrackDirection = !withTrackDirection; Refresh(); return true; }
-
-    private bool Move(int delta)
-    {
-        var count = Available().Count;
-        if (count == 0) return false;
-        selectedIndex = (selectedIndex + delta + count) % count;
-        UpdateSelectedBounds();
-        Refresh();
-        return true;
-    }
 
     private void UpdateSelectedBounds()
     {
@@ -161,7 +153,7 @@ internal sealed class BDVMStarterDeliveryRadio : MonoBehaviour, ICommsRadioMode
         if (selectedIndex >= grants.Count) selectedIndex = 0;
         var grant = grants[selectedIndex];
         var direction = withTrackDirection ? "track direction" : "reverse direction";
-        var prompt = placementLocked ? $"{grant.DefinitionIds[0]}\n{direction}\nA/B reverse; Use confirms" : $"{selectedIndex + 1}/{grants.Count}: {grant.DefinitionIds[0]}\nA/B select; Use chooses placement";
+        var prompt = placementLocked ? $"{grant.DefinitionIds[0]}\n{direction}\nA/B reverse; Use confirms" : $"Next: {grant.DefinitionIds[0]}\nUse chooses placement";
         display.SetDisplay("BDVM DELIVERY", result ?? prompt, canSpawn ? "confirm" : "cancel");
     }
 
