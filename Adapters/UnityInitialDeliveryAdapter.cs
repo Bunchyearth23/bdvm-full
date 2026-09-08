@@ -14,13 +14,15 @@ internal sealed class UnityInitialDeliveryAdapter : IInitialDeliveryPort
     private static readonly object Gate = new object();
     private static readonly Dictionary<string, string[]> Completed = new Dictionary<string, string[]>(StringComparer.Ordinal);
     private readonly Dictionary<string, InitialDeliveryTargetKind> allowedTracks;
+    private readonly IReadOnlyDictionary<string, double> requestedStartSpans;
 
-    public UnityInitialDeliveryAdapter(IEnumerable<InitialDeliveryTrackRule> rules)
+    public UnityInitialDeliveryAdapter(IEnumerable<InitialDeliveryTrackRule> rules, IReadOnlyDictionary<string, double>? requestedStartSpans = null)
     {
         allowedTracks = (rules ?? Array.Empty<InitialDeliveryTrackRule>())
             .Where(x => x != null && !string.IsNullOrWhiteSpace(x.TrackId))
             .GroupBy(x => x.TrackId.Trim(), StringComparer.Ordinal)
             .ToDictionary(x => x.Key, x => x.Single().Kind, StringComparer.Ordinal);
+        this.requestedStartSpans = requestedStartSpans ?? new Dictionary<string, double>(StringComparer.Ordinal);
     }
 
     public InitialDeliveryPortResult Preflight(string operationId, string trackId, InitialDeliveryTargetKind targetKind, IReadOnlyList<string> definitionIds)
@@ -53,7 +55,10 @@ internal sealed class UnityInitialDeliveryAdapter : IInitialDeliveryPort
             {
                 var track = ResolveTrack(trackId);
                 var liveries = ResolveLiveries(definitionIds);
-                spawned = CarSpawner.Instance.SpawnCarTypesOnTrackStrict(liveries, track, true, true, 10f, false, false, false);
+                var consistLength = CarSpawner.Instance.GetTotalCarLiveriesLength(liveries, true);
+                var requested = requestedStartSpans.TryGetValue(trackId, out var span) ? span - consistLength / 2d : 10d;
+                var startSpan = Math.Max(5d, Math.Min(requested, track.curve.length - consistLength - 5d));
+                spawned = CarSpawner.Instance.SpawnCarTypesOnTrackStrict(liveries, track, true, true, startSpan, false, false, false);
                 if (spawned == null || spawned.Count != liveries.Count || spawned.Any(x => x == null || !Guid.TryParse(x.CarGUID, out var guid) || guid == Guid.Empty))
                 {
                     if (spawned != null && spawned.Count > 0) CarSpawner.Instance.DeleteTrainCars(spawned, true);

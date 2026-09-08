@@ -12,10 +12,11 @@ internal sealed class BDVMStarterDeliveryRadio : MonoBehaviour, ICommsRadioMode
 {
     private const float SignalRange = 100f;
     private static Func<IReadOnlyList<InitialDeliveryGrant>> pending = () => Array.Empty<InitialDeliveryGrant>();
-    private static Func<RailTrack, InitialDeliveryTargetKind, InitialDeliveryGrant, string> deliver = (_, _, _) => "BDVM is not ready.";
+    private static Func<RailTrack, double, InitialDeliveryTargetKind, InitialDeliveryGrant, string> deliver = (_, _, _, _) => "BDVM is not ready.";
     private CommsRadioDisplay? display;
     private Transform? signalOrigin;
     private RailTrack? pointedTrack;
+    private double pointedSpan;
     private InitialDeliveryTargetKind pointedKind;
     private int selectedIndex;
 
@@ -24,7 +25,7 @@ internal sealed class BDVMStarterDeliveryRadio : MonoBehaviour, ICommsRadioMode
     public void OverrideSignalOrigin(Transform origin) => signalOrigin = origin;
 
     internal static void Configure(Func<IReadOnlyList<InitialDeliveryGrant>> pendingProvider,
-        Func<RailTrack, InitialDeliveryTargetKind, InitialDeliveryGrant, string> delivery)
+        Func<RailTrack, double, InitialDeliveryTargetKind, InitialDeliveryGrant, string> delivery)
     {
         pending = pendingProvider ?? throw new ArgumentNullException(nameof(pendingProvider));
         deliver = delivery ?? throw new ArgumentNullException(nameof(delivery));
@@ -56,7 +57,7 @@ internal sealed class BDVMStarterDeliveryRadio : MonoBehaviour, ICommsRadioMode
         if (grants.Count == 0) { Refresh("No delivery pending."); return; }
         if (pointedTrack == null || !IsEligible(pointedTrack)) { Refresh("Aim at a depot/service track."); return; }
         if (selectedIndex >= grants.Count) selectedIndex = 0;
-        Refresh(deliver(pointedTrack, pointedKind, grants[selectedIndex]));
+        Refresh(deliver(pointedTrack, pointedSpan, pointedKind, grants[selectedIndex]));
     }
 
     public bool ButtonACustomAction() => Move(-1);
@@ -89,10 +90,13 @@ internal sealed class BDVMStarterDeliveryRadio : MonoBehaviour, ICommsRadioMode
     private RailTrack? FindPointedTrack()
     {
         if (signalOrigin == null || !Physics.Raycast(signalOrigin.position, signalOrigin.forward, out var hit, SignalRange, LayerMask.GetMask("Default"))) return null;
-        return RailTrackRegistry.Instance?.AllTracks
+        var match = RailTrackRegistry.Instance?.AllTracks
             .Select(track => new { Track = track, Point = RailTrack.GetPointWithinRangeWithYOffset(track, hit.point, 1.5f) })
             .Where(x => x.Point.HasValue).OrderBy(x => ((Vector3)x.Point!.Value.position - hit.point).sqrMagnitude)
-            .Select(x => x.Track).FirstOrDefault();
+            .FirstOrDefault();
+        if (match == null) return null;
+        pointedSpan = match.Point!.Value.span;
+        return match.Track;
     }
 
     private static bool IsEligible(RailTrack? track)
