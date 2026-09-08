@@ -103,7 +103,7 @@ The first stable suite release remains reserved for `1.0.0`.
 - SelfShunt: [original](https://github.com/Chump-the-Lump/DV-SelfShunter), [BDVM fork](https://github.com/Bunchyearth23/DV-SelfShunter), recorded base `329c85cf51715404af3b4d455239d9fc54f5ac5b`, credit `Chump_the_Lump`.
 - Multiplayer: [AMacro upstream](https://github.com/AMacro/dv-multiplayer), [BDVM fork](https://github.com/Bunchyearth23/dv-multiplayer), Apache-2.0.
 - Remote Dispatch: [mspielberg upstream](https://github.com/mspielberg/dv-remote-dispatch), [BDVM fork](https://github.com/Bunchyearth23/dv-remote-dispatch), MIT.
-- Passenger Jobs: [katycat5e/DVPassengerJobs](https://github.com/katycat5e/DVPassengerJobs), recorded audit revision `9bb668cbc2f3d270d282b2b3297667f01bec3e18`, MIT; no upstream code is copied into the bridge.
+- Passenger Jobs: [katycat5e upstream](https://github.com/katycat5e/DVPassengerJobs), [BDVM fork](https://github.com/Bunchyearth23/DVPassengerJobs), recorded upstream audit revision `9bb668cbc2f3d270d282b2b3297667f01bec3e18`, MIT; the fork provides the versioned `PassengerJobs.API` consumed by `BDVM.PassengerJobsBridge`, and no upstream code is copied into the bridge.
 
 Required upstream notices and attribution must remain present in redistributed builds.
 
