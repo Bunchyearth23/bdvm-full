@@ -127,6 +127,7 @@ public static class Main
     private static string triageTracks = "YARD-A,YARD-B";
     private static string? selectedTriagePlanId;
     private static int walletSyncFrames;
+    private static int populationControlRetryFrames;
     private static IServer? configuredServer;
     private static IClient? configuredClient;
     private static MultiplayerServerProtocolAdapter? serverProtocol;
@@ -279,6 +280,11 @@ public static class Main
 
     private static void OnUpdate(UnityModManager.ModEntry entry, float deltaTime)
     {
+        if (++populationControlRetryFrames >= 60)
+        {
+            populationControlRetryFrames = 0;
+            UnityWorldPopulationControl.RetryPendingActivation();
+        }
         if (runtimeSettings.EnableWalletBridge && runtimeStateProvider?.Current != null && !runtimeStateProvider.Current.OperatingCosts.Any(x => x.State == OperatingCostState.Open || x.ExternalSettlement == ExternalSettlementState.Pending || x.ExternalSettlement == ExternalSettlementState.Conflict) && !runtimeStateProvider.Current.Assignments.Any(x => x.State == MissionAssignmentState.Active || x.State == MissionAssignmentState.CompletionPending || x.ExternalSettlement == ExternalSettlementState.Pending) && ++walletSyncFrames >= 120)
         {
             walletSyncFrames = 0;

@@ -24,6 +24,7 @@ public static class UnityWorldPopulationControl
     private static SelfShuntGeneratorControl? selfShunt;
     private static PassengerJobsGenerationControl? passengerJobs;
     private static bool vanillaJobsSuppressed;
+    private static bool eligibleCareerObserved;
 
     public static WorldPopulationRuntimeState State { get; private set; } = WorldPopulationRuntimeState.Disabled;
     public static string ResultCode { get; private set; } = "population-control-disabled";
@@ -35,7 +36,7 @@ public static class UnityWorldPopulationControl
         authority = roleDetector ?? throw new ArgumentNullException(nameof(roleDetector));
         log = logger ?? throw new ArgumentNullException(nameof(logger));
         WorldPopulationPolicyEngine.Validate(policy);
-        LoggedDecisions.Clear(); selfShunt = null; passengerJobs = null; vanillaJobsSuppressed = false;
+        LoggedDecisions.Clear(); selfShunt = null; passengerJobs = null; vanillaJobsSuppressed = false; eligibleCareerObserved = false;
         State = enabled ? WorldPopulationRuntimeState.AwaitingCareer : WorldPopulationRuntimeState.Disabled;
         ResultCode = enabled ? "population-control-awaiting-career" : "population-control-disabled";
         Log("bootstrap", WorldPopulationSource.Unknown, enabled ? "configured" : "disabled", ResultCode, policy.Strict.ToString());
@@ -45,6 +46,7 @@ public static class UnityWorldPopulationControl
     {
         if (!configured) return;
         if (!skipTutorial) { Refuse("strict-population-tutorial-refused"); return; }
+        eligibleCareerObserved = true;
         Activate("new-career-non-tutorial");
     }
 
@@ -53,12 +55,19 @@ public static class UnityWorldPopulationControl
         if (!configured) return;
         var hasBdvmCheckpoint = data?.GetJObject("BDVM")?["SaveGameIntegration"]?.Type == Newtonsoft.Json.Linq.JTokenType.String;
         if (!hasBdvmCheckpoint) { Refuse("strict-population-existing-save-without-bdvm-checkpoint"); return; }
+        eligibleCareerObserved = true;
         Activate("existing-bdvm-career");
+    }
+
+    public static void RetryPendingActivation()
+    {
+        if (configured && eligibleCareerObserved && State == WorldPopulationRuntimeState.AwaitingCareer)
+            Activate("deferred-runtime-authority-ready");
     }
 
     public static bool ShouldRun(WorldPopulationSource source, string origin, int existingPhysicalCount = 0)
     {
-        if (!configured || State != WorldPopulationRuntimeState.Active) return true;
+        if (!configured || State == WorldPopulationRuntimeState.Disabled || State == WorldPopulationRuntimeState.ClientObserver || State == WorldPopulationRuntimeState.Refused) return true;
         var decision = WorldPopulationPolicyEngine.Evaluate(policy, new WorldPopulationRequest
         {
             CorrelationId = "world-population:" + origin,
@@ -90,8 +99,8 @@ public static class UnityWorldPopulationControl
             State = WorldPopulationRuntimeState.ClientObserver; ResultCode = "population-control-client-observer";
             Log("activation", WorldPopulationSource.Unknown, context, ResultCode, reason); return;
         }
-        if (!PassengerJobsGenerationControl.TryCreate(out passengerJobs, out var passengerCode)) { Refuse(passengerCode); return; }
-        if (!SelfShuntBridgeLocator.TryCreate(out selfShunt, out var selfShuntCode)) { passengerJobs = null; Refuse(selfShuntCode); return; }
+        if (!PassengerJobsGenerationControl.TryCreate(out passengerJobs, out var passengerCode)) { AwaitAuthority(passengerCode); return; }
+        if (!SelfShuntBridgeLocator.TryCreate(out selfShunt, out var selfShuntCode)) { passengerJobs = null; AwaitAuthority(selfShuntCode); return; }
         var operation = "bdvm-world-population:" + Guid.NewGuid().ToString("N");
         var report = IndustrialRuntimeGate.TryEnableStrictWithReport(operation, new ITransportGeneratorAdapter[]
         {
@@ -99,7 +108,7 @@ public static class UnityWorldPopulationControl
             new RuntimeGeneratorAdapter("passengerjobs", passengerJobs!.IsAvailable, passengerJobs.TrySet, EmptyJobInventory),
             new RuntimeGeneratorAdapter("selfshunt", selfShunt!.IsAvailable, selfShunt.TrySetStrictEconomyPolicy, EmptyJobInventory)
         });
-        if (!report.Applied) { Refuse(report.ResultCode); return; }
+        if (!report.Applied) { AwaitAuthority(report.ResultCode); return; }
         State = WorldPopulationRuntimeState.Active; ResultCode = "strict-population-control-active";
         Log("activation", WorldPopulationSource.Unknown, context, ResultCode, "vanilla, Multiplayer, SelfShunt and PassengerJobs generators are governed; preservedVanillaJobs=" + report.PreservedOpenJobIds.Count);
     }
@@ -108,6 +117,14 @@ public static class UnityWorldPopulationControl
     {
         State = WorldPopulationRuntimeState.Refused; ResultCode = code;
         Log("activation-refused", WorldPopulationSource.Unknown, "career", code, "No vanilla Harmony source is suppressed after refusal.");
+    }
+
+    private static void AwaitAuthority(string code)
+    {
+        State = WorldPopulationRuntimeState.AwaitingCareer;
+        ResultCode = code;
+        var key = "activation-awaiting|" + code;
+        if (LoggedDecisions.Add(key)) Log("activation-awaiting", WorldPopulationSource.Unknown, "career", code, "Strict spawn patches remain fail-closed while runtime generator authority becomes available.");
     }
 
     private static void Log(string eventName, WorldPopulationSource source, string origin, string code, string detail) =>
@@ -245,6 +262,15 @@ internal static class BDVMMultiplayerNaturalLocomotivePatch
     private static bool Prepare() => TargetMethod() != null;
     [HarmonyPrefix, HarmonyPriority(Priority.First)]
     private static bool Prefix() => UnityWorldPopulationControl.ShouldRun(WorldPopulationSource.NaturalLocomotive, "multiplayer:StationLocoSpawner.SpawnLocomotives");
+}
+
+[HarmonyPatch]
+internal static class BDVMSelfShuntNaturalPopulationPatch
+{
+    private static MethodBase? TargetMethod() => AccessTools.Method("SelfShunt.SSCarSpawner:PopulateMapWithCars");
+    private static bool Prepare() => TargetMethod() != null;
+    [HarmonyPrefix, HarmonyPriority(Priority.First)]
+    private static bool Prefix() => UnityWorldPopulationControl.ShouldRun(WorldPopulationSource.NaturalLocomotive, "selfshunt:SSCarSpawner.PopulateMapWithCars");
 }
 
 [HarmonyPatch]
