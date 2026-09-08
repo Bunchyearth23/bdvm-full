@@ -44,6 +44,7 @@ public static class Main
     private static readonly HashSet<string> bundleSelection = new HashSet<string>(StringComparer.Ordinal);
     private static string governanceTargetPlayerId = "";
     private static int governancePolicy;
+    private static string governancePolicyCompanyId = "";
     private static string liquidationDebts = "0";
     private static string liquidationPenalties = "0";
     private static string liquidationConfirmation = "";
@@ -62,6 +63,7 @@ public static class Main
     private static string marketNewStock = "0";
     private static string? selectedMarketListingId;
     private static bool marketBuyForCompany;
+    private static string? selectedInitialDeliveryGrantId;
     private static string? selectedLeaseId;
     private static string leaseDeposit = "1000";
     private static string leaseInitialFee = "100";
@@ -213,7 +215,7 @@ public static class Main
                 if (!SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance))
                     throw new InvalidOperationException("Could not stage multiplayer economy state in SaveGameData.");
             },
-            message => mod?.Logger.Log(message));
+            message => mod?.Logger.Log(message), runtimeSettings.StarterBundleDefinitionIds);
         serverProtocol = new MultiplayerServerProtocolAdapter(server, new PersistentMultiplayerPeerIdentityResolver(), new CompanyProtocolHost(executor), message => mod?.Logger.Log(message));
         server.RegisterSerializablePacket<BDVMSerializablePacket>(serverProtocol.Receive);
         configuredServer = server;
@@ -252,7 +254,7 @@ public static class Main
 
     private static void OnUpdate(UnityModManager.ModEntry entry, float deltaTime)
     {
-        if (runtimeSettings.EnableWalletBridge && runtimeStateProvider?.Current != null && !runtimeStateProvider.Current.OperatingCosts.Any(x => x.State == OperatingCostState.Open || x.ExternalSettlement == ExternalSettlementState.Pending) && !runtimeStateProvider.Current.Assignments.Any(x => x.State == MissionAssignmentState.Active || x.State == MissionAssignmentState.CompletionPending || x.ExternalSettlement == ExternalSettlementState.Pending) && ++walletSyncFrames >= 120)
+        if (runtimeSettings.EnableWalletBridge && runtimeStateProvider?.Current != null && !runtimeStateProvider.Current.OperatingCosts.Any(x => x.State == OperatingCostState.Open || x.ExternalSettlement == ExternalSettlementState.Pending || x.ExternalSettlement == ExternalSettlementState.Conflict) && !runtimeStateProvider.Current.Assignments.Any(x => x.State == MissionAssignmentState.Active || x.State == MissionAssignmentState.CompletionPending || x.ExternalSettlement == ExternalSettlementState.Pending) && ++walletSyncFrames >= 120)
         {
             walletSyncFrames = 0;
             TrySynchronizeHostWallet(entry, "periodic-vanilla-observation");
@@ -294,10 +296,16 @@ public static class Main
         }
         var legacyBalance = runtimeSettings.EnableWalletBridge ? hostWallet.ReadBalance() : 0;
         var player = runtimeStateProvider.EnsureLocalPlayer(legacyBalance);
+        var starterDefinitions = runtimeSettings.StarterBundleDefinitionIds ?? new List<string>();
+        if (starterDefinitions.Count > 0)
+        {
+            var starter = runtimeStateProvider.GrantLocalStarterBundle("starter-bundle:" + player.PlayerId, starterDefinitions, runtimeRoleDetector!);
+            entry.Logger.Log("[correlation=runtime-bootstrap] [event=starter-bundle] player=" + player.PlayerId + ", grant=" + starter.GrantId + ", components=" + string.Join(",", starter.DefinitionIds) + ", state=" + starter.State);
+        }
         if (runtimeSettings.EnableWalletBridge)
             TrySynchronizeHostWallet(entry, "world-load");
         SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance);
-        status = "BDVM 1.9.1 ready for " + player.PlayerId + ".";
+        status = "BDVM 2.0.0 ready for " + player.PlayerId + ".";
         entry.Logger.Log("[correlation=runtime-bootstrap] Runtime state ready; player=" + player.PlayerId + ", legacyBalancePolicy=host-keeps-existing-balance, walletBridge=" + runtimeSettings.EnableWalletBridge + ", transfers=" + runtimeSettings.EnableCompanyTransfers + ", acquisition=" + runtimeSettings.EnableVehicleAcquisition + ".");
         entry.Logger.Log("[correlation=wallet-migration] [event=wallet-migration-policy] policy=host-keeps-existing-balance-v1, player=" + player.PlayerId + ", observedVanillaBalance=" + legacyBalance + ", remotePlayerInitialBalance=0");
         if (runtimeSettings.VerboseLogging)
@@ -329,7 +337,7 @@ public static class Main
 
     private static void DrawCompanyPanel(UnityModManager.ModEntry entry)
     {
-        GUILayout.Label("BDVM 1.9.1 — incremental modular economy build; categorized acquisition browser and visit-based cleanup guard enabled");
+        GUILayout.Label("BDVM 2.0.0 — modular economy build; catalog ownership and one-shot depot delivery enabled");
         GUILayout.Label("SaveGameData hook: " + (SaveGameRuntimeHook.Enabled ? "enabled" : "disabled"));
         GUILayout.Label("Read-only output: " + Path.Combine(entry.Path, "diagnostics"));
         if (GUILayout.Button("Export authoritative host diagnostic"))
@@ -437,7 +445,15 @@ public static class Main
         GUILayout.Space(6f);
         GUILayout.Label("Company governance | leader: " + company.LeaderId + " | policy: " + company.MembershipPolicy + " | version: " + company.Version);
         if (!runtimeSettings.EnableCompanyGovernance) { GUILayout.Label("Company governance is disabled by runtime settings."); return; }
+        if (!string.Equals(governancePolicyCompanyId, company.CompanyId, StringComparison.Ordinal))
+        {
+            governancePolicyCompanyId = company.CompanyId;
+            governancePolicy = company.MembershipPolicy == MembershipPolicy.InvitationOnly ? 1 : company.MembershipPolicy == MembershipPolicy.Open ? 2 : 0;
+        }
+        var canManageMembers = company.LeaderId == player.PlayerId || (company.DelegatedPermissions.TryGetValue(player.PlayerId, out var memberRights) && memberRights.Contains(CompanyPermission.ManageMembers));
+        var canManagePermissions = company.LeaderId == player.PlayerId || (company.DelegatedPermissions.TryGetValue(player.PlayerId, out var permissionRights) && permissionRights.Contains(CompanyPermission.ManagePermissions));
         governancePolicy = GUILayout.Toolbar(governancePolicy, new[] { "Applications", "Invitation only", "Open" });
+        GUI.enabled = canManageMembers;
         if (GUILayout.Button("Apply membership policy"))
         {
             var policy = governancePolicy == 1 ? MembershipPolicy.InvitationOnly : governancePolicy == 2 ? MembershipPolicy.Open : MembershipPolicy.ApplicationWithApproval;
@@ -446,6 +462,7 @@ public static class Main
         GUILayout.Label("Known player ID for invitation or delegation:");
         governanceTargetPlayerId = GUILayout.TextField(governanceTargetPlayerId ?? "", 96);
         GUILayout.BeginHorizontal();
+        GUI.enabled = canManageMembers;
         if (GUILayout.Button("Invite player")) ExecuteGovernance(entry, "player-invite", () => runtimeStateProvider!.InvitePlayerFor("player-invite:" + Guid.NewGuid().ToString("N"), player.PlayerId, company.CompanyId, governanceTargetPlayerId, runtimeRoleDetector!));
         GUI.enabled = company.LeaderId == player.PlayerId && company.Members.Contains(governanceTargetPlayerId);
         if (GUILayout.Button("Transfer leadership")) ExecuteGovernance(entry, "leadership-transfer", () => runtimeStateProvider!.TransferLeadershipFor("leadership-transfer:" + Guid.NewGuid().ToString("N"), player.PlayerId, company.CompanyId, governanceTargetPlayerId, runtimeRoleDetector!));
@@ -455,8 +472,10 @@ public static class Main
         {
             GUILayout.Label("Application: " + application.PlayerId);
             GUILayout.BeginHorizontal();
+            GUI.enabled = canManageMembers;
             if (GUILayout.Button("Accept")) ExecuteGovernance(entry, "application-accept", () => runtimeStateProvider!.DecideApplicationFor("application-decision:" + Guid.NewGuid().ToString("N"), player.PlayerId, application.RequestId, true, runtimeRoleDetector!));
             if (GUILayout.Button("Refuse")) ExecuteGovernance(entry, "application-refuse", () => runtimeStateProvider!.DecideApplicationFor("application-decision:" + Guid.NewGuid().ToString("N"), player.PlayerId, application.RequestId, false, runtimeRoleDetector!));
+            GUI.enabled = true;
             GUILayout.EndHorizontal();
         }
         GUILayout.Label("Members: " + string.Join(", ", company.Members));
@@ -466,8 +485,10 @@ public static class Main
             foreach (CompanyPermission permission in Enum.GetValues(typeof(CompanyPermission)))
             {
                 var enabled = rights.Contains(permission);
+                GUI.enabled = canManagePermissions;
                 if (GUILayout.Button((enabled ? "Revoke " : "Grant ") + permission + " — " + governanceTargetPlayerId))
                     ExecuteGovernance(entry, "permission-change", () => runtimeStateProvider!.SetPermissionFor("permission-change:" + Guid.NewGuid().ToString("N"), player.PlayerId, company.CompanyId, governanceTargetPlayerId, permission, !enabled, runtimeRoleDetector!));
+                GUI.enabled = true;
             }
         }
         GUI.enabled = company.LeaderId != player.PlayerId;
@@ -546,7 +567,7 @@ public static class Main
             var result = action();
             if (!SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance)) throw new InvalidOperationException("Governance mutation could not be staged for save.");
             status = "Governance: " + result.State + " / " + result.ResultCode + ".";
-            entry.Logger.Log("[correlation=" + correlation + "] [event=" + eventName + "] command=" + result.CommandId + ", company=" + result.CompanyId + ", state=" + result.State + ", result=" + result.ResultCode);
+            entry.Logger.Log("[correlation=" + correlation + "] [event=" + eventName + "] command=" + result.CommandId + ", requester=" + result.RequesterId + ", company=" + result.CompanyId + ", operations=" + string.Join(",", result.OperationIds) + ", state=" + result.State + ", result=" + result.ResultCode);
         }
         catch (Exception exception)
         {
@@ -739,7 +760,7 @@ public static class Main
     {
         GUILayout.Space(8f); GUILayout.Label("Finite vehicle market (incremental validation module)");
         if (!runtimeSettings.EnableFiniteMarket) { GUILayout.Label("Finite market is disabled by runtime settings."); return; }
-        GUILayout.Label("New-vehicle delivery stays disabled until a safe game spawn adapter is proven. Existing resolved locomotives and wagons can be listed.");
+        GUILayout.Label("Catalog purchases create owned virtual stock. Initial delivery is free once and restricted to configured depot/service tracks.");
         GUILayout.Label("Location | base price | transfer fee | observed condition | market factor | buyback rate | new stock:");
         GUILayout.BeginHorizontal();
         marketLocation = GUILayout.TextField(marketLocation ?? "", 32); marketBasePrice = GUILayout.TextField(marketBasePrice ?? "", 16);
@@ -748,7 +769,7 @@ public static class Main
         marketNewStock = GUILayout.TextField(marketNewStock ?? "", 6);
         GUILayout.EndHorizontal();
         if (GUILayout.Button("Configure selected definition and publish this existing vehicle")) PublishFiniteMarketVehicle(entry);
-        if (GUILayout.Button("Generate one stock-backed new-order listing (delivery adapter remains disabled)")) GenerateFiniteMarketOrder(entry);
+        if (GUILayout.Button("Generate one stock-backed catalog listing")) GenerateFiniteMarketOrder(entry);
         foreach (var listing in snapshot.Market.Listings.Where(x => x.State == MarketListingState.Available || x.State == MarketListingState.DeliveryPending).OrderBy(x => x.ExpiresTick).Take(50).ToArray())
         {
             var marker = listing.ListingId == selectedMarketListingId ? "> " : "  ";
@@ -760,8 +781,31 @@ public static class Main
             if (GUILayout.Button("Purchase selected finite listing")) PurchaseFiniteMarketListing(entry, marketBuyForCompany && hasCompany);
         }
         var pending = snapshot.Market.Purchases.Count(x => x.State == MarketPurchaseState.ReconcileRequired);
-        if (pending > 0 && GUILayout.Button("Reconcile pending market deliveries (" + pending + ")")) ReconcileFiniteMarket(entry);
+        if (pending > 0 && GUILayout.Button("Reconcile legacy pending market purchases (" + pending + ")")) ReconcileFiniteMarket(entry);
+        DrawInitialDeliveries(entry, snapshot);
         if (GUILayout.Button("Advance validation market clock by 100 ticks and expire due listings")) AdvanceFiniteMarketClock(entry);
+    }
+
+    private static void DrawInitialDeliveries(UnityModManager.ModEntry entry, VehicleAcquisitionSnapshot snapshot)
+    {
+        GUILayout.Space(4f);
+        GUILayout.Label("Owned stock awaiting initial delivery:");
+        foreach (var grant in snapshot.InitialDeliveries.Where(x => x.State != InitialDeliveryState.Delivered).OrderBy(x => x.GrantId).Take(30).ToArray())
+        {
+            var marker = grant.GrantId == selectedInitialDeliveryGrantId ? "> " : "  ";
+            if (GUILayout.Button(marker + string.Join(" + ", grant.DefinitionIds) + " | " + grant.Owner.Key + " | " + grant.State + " | " + grant.ResultCode)) selectedInitialDeliveryGrantId = grant.GrantId;
+        }
+        if (string.IsNullOrWhiteSpace(selectedInitialDeliveryGrantId)) return;
+        var selected = snapshot.InitialDeliveries.SingleOrDefault(x => x.GrantId == selectedInitialDeliveryGrantId);
+        if (selected == null) { selectedInitialDeliveryGrantId = null; return; }
+        if (runtimeSettings.InitialDeliveryTracks == null || runtimeSettings.InitialDeliveryTracks.Count == 0)
+        {
+            GUILayout.Label("No delivery track is configured. Add exact track IDs to runtime-settings.json before enabling physical placement.");
+            return;
+        }
+        foreach (var rule in runtimeSettings.InitialDeliveryTracks.OrderBy(x => x.TrackId).ToArray())
+            if (GUILayout.Button("Place once on " + rule.Kind + " track " + rule.TrackId)) PlaceInitialDelivery(entry, selected, rule);
+        if ((selected.State == InitialDeliveryState.PlacementPending || selected.State == InitialDeliveryState.ReconcileRequired) && GUILayout.Button("Reconcile selected physical delivery")) ReconcileInitialDeliveries(entry);
     }
 
     private static void PublishFiniteMarketVehicle(UnityModManager.ModEntry entry)
@@ -833,6 +877,35 @@ public static class Main
         var correlation = Guid.NewGuid().ToString("N");
         try { RequireHostAuthority(); var results = runtimeStateProvider!.ReconcilePendingMarketPurchases(runtimeRoleDetector!, new UnityExistingVehicleOwnershipAdapter(), new DisabledMarketDeliveryPort()); SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance); status = "Market reconciliation: " + results.Count + " record(s)."; foreach (var result in results) entry.Logger.Log("[correlation=" + correlation + "] [event=finite-market-reconcile] command=" + result.CommandId + ", state=" + result.State + ", result=" + result.ResultCode); }
         catch (Exception exception) { status = "Market reconciliation refused: " + exception.Message; entry.Logger.Error("[correlation=" + correlation + "] [event=finite-market-reconcile-failed] " + exception); }
+    }
+
+    private static void PlaceInitialDelivery(UnityModManager.ModEntry entry, InitialDeliveryGrant grant, InitialDeliveryTrackRule rule)
+    {
+        var correlation = Guid.NewGuid().ToString("N");
+        try
+        {
+            RequireHostAuthority();
+            var adapter = new UnityInitialDeliveryAdapter(runtimeSettings.InitialDeliveryTracks);
+            var result = runtimeStateProvider!.PlaceLocalInitialDelivery("initial-delivery:" + correlation, grant.GrantId, rule.TrackId, rule.Kind, runtimeRoleDetector!, adapter);
+            if (!SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance)) throw new InvalidOperationException("Initial delivery state could not be staged in SaveGameData.");
+            status = "Initial delivery: " + result.State + " / " + result.ResultCode + ".";
+            entry.Logger.Log("[correlation=" + correlation + "] [event=initial-delivery] grant=" + result.GrantId + ", owner=" + result.Owner.Key + ", track=" + result.TargetTrackId + ", kind=" + result.TargetKind + ", components=" + string.Join(",", result.AssetIds) + ", state=" + result.State + ", result=" + result.ResultCode);
+        }
+        catch (Exception exception) { status = "Initial delivery refused: " + exception.Message; entry.Logger.Error("[correlation=" + correlation + "] [event=initial-delivery-refused] grant=" + grant.GrantId + ", track=" + rule.TrackId + ", error=" + exception); }
+    }
+
+    private static void ReconcileInitialDeliveries(UnityModManager.ModEntry entry)
+    {
+        var correlation = Guid.NewGuid().ToString("N");
+        try
+        {
+            RequireHostAuthority();
+            var results = runtimeStateProvider!.ReconcilePendingInitialDeliveries(runtimeRoleDetector!, new UnityInitialDeliveryAdapter(runtimeSettings.InitialDeliveryTracks));
+            if (!SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance)) throw new InvalidOperationException("Reconciled initial delivery state could not be staged in SaveGameData.");
+            status = "Initial delivery reconciliation: " + results.Count + " record(s).";
+            foreach (var result in results) entry.Logger.Log("[correlation=" + correlation + "] [event=initial-delivery-reconcile] grant=" + result.GrantId + ", state=" + result.State + ", result=" + result.ResultCode);
+        }
+        catch (Exception exception) { status = "Initial delivery reconciliation refused: " + exception.Message; entry.Logger.Error("[correlation=" + correlation + "] [event=initial-delivery-reconcile-failed] " + exception); }
     }
 
     private static void DrawDynamicEconomy(UnityModManager.ModEntry entry, VehicleAcquisitionSnapshot snapshot)
@@ -1057,11 +1130,11 @@ public static class Main
         GUILayout.Label("Owned: " + owned.Length + " | locomotives: " + owned.Count(x => x.Kind == FleetVehicleKind.Locomotive) +
             " | freight wagons: " + owned.Count(x => x.Kind == FleetVehicleKind.FreightWagon) +
             " | passenger cars: " + owned.Count(x => x.Kind == FleetVehicleKind.PassengerCar));
-        foreach (var unsettled in snapshot.OperatingCosts.Where(x => x.State == OperatingCostState.Open || x.ExternalSettlement == ExternalSettlementState.Pending).ToArray())
+        foreach (var unsettled in snapshot.OperatingCosts.Where(x => x.State == OperatingCostState.Open || x.ExternalSettlement == ExternalSettlementState.Pending || x.ExternalSettlement == ExternalSettlementState.Conflict).ToArray())
         {
             GUILayout.BeginHorizontal();
             if (GUILayout.Button("Cost session " + unsettled.Action + " | " + unsettled.ResultCode)) selectedFleetAssetId = unsettled.AssetId;
-            if (unsettled.ExternalSettlement == ExternalSettlementState.Pending && GUILayout.Button("Recover reimbursement", GUILayout.Width(190f))) RecoverOperatingCostSettlement(entry, unsettled.SessionId);
+            if ((unsettled.ExternalSettlement == ExternalSettlementState.Pending || unsettled.ExternalSettlement == ExternalSettlementState.Conflict) && GUILayout.Button("Recover reimbursement", GUILayout.Width(190f))) RecoverOperatingCostSettlement(entry, unsettled.SessionId);
             GUILayout.EndHorizontal();
         }
         var pendingResales = snapshot.Resales.Count(x => x.State == ResaleState.ReconcileRequired);
@@ -1295,6 +1368,7 @@ public static class Main
             GUILayout.Label("Condition after (0..1):");
             maintenanceCondition = GUILayout.TextField(maintenanceCondition ?? "1", 12);
             if (GUILayout.Button("Complete cost observation from current vanilla wallet")) CompleteOperatingCost(entry, open.SessionId);
+            if (GUILayout.Button("Cancel observation (only if vanilla wallet is unchanged)")) CancelOperatingCost(entry, open.SessionId);
             return;
         }
         maintenanceActionIndex = GUILayout.Toolbar(maintenanceActionIndex, new[] { "Inspect", "Service", "Repair", "Refuel" });
@@ -1380,6 +1454,25 @@ public static class Main
         {
             status = "Operating cost reimbursement recovery refused: " + exception.Message;
             entry.Logger.Error("[correlation=" + correlation + "] [event=operating-cost-reimbursement-recovery-refused] session=" + sessionId + ", error=" + exception);
+        }
+    }
+
+    private static void CancelOperatingCost(UnityModManager.ModEntry entry, string sessionId)
+    {
+        var correlation = Guid.NewGuid().ToString("N");
+        try
+        {
+            RequireHostAuthority();
+            var record = runtimeStateProvider!.CancelLocalOperatingCost(sessionId, hostWallet.ReadBalance(), runtimeRoleDetector!);
+            if (!SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance)) throw new InvalidOperationException("Operating cost cancellation could not be staged for save.");
+            activeOperatingCostSessionId = null;
+            status = "Operating cost observation cancelled; reserved company funds were released.";
+            entry.Logger.Log("[correlation=" + correlation + "] [event=operating-cost-cancelled] session=" + record.SessionId + ", payer=" + record.Payer.Key + ", reservation=" + record.ReservedAmount + ", result=" + record.ResultCode);
+        }
+        catch (Exception exception)
+        {
+            status = "Operating cost cancellation refused: " + exception.Message;
+            entry.Logger.Error("[correlation=" + correlation + "] [event=operating-cost-cancel-refused] session=" + sessionId + ", error=" + exception);
         }
     }
 
@@ -1552,12 +1645,18 @@ public static class Main
         RequireHostAuthority(); var snapshot = runtimeStateProvider?.Current ?? throw new InvalidOperationException("BDVM career state is unavailable."); var playerId = runtimeStateProvider!.LocalPlayerId!;
         var payload = new
         {
-            schema = "bdvm.remote-dispatch", schemaVersion = 1, release = "1.9.1", transportIdentity, authorityActor = playerId,
-            supportedIntents = new[] { "fleet.set-state", "assignment.cancel" },
+            schema = "bdvm.remote-dispatch", schemaVersion = 2, release = "2.0.0", transportIdentity, authorityActor = playerId,
+            supportedIntents = new[] { "fleet.set-state", "fleet.rename", "company.create", "company.apply", "company.invite", "company.decide-application", "company.respond-invitation", "company.leave", "company.policy", "company.permission", "company.transfer-leadership", "wallet.transfer", "market.purchase", "initial-delivery.place", "assignment.cancel" },
             wallets = snapshot.Economy.Wallets.Select(x => new { account = x.Account.Key, x.Balance, x.Version }),
-            companies = snapshot.Economy.Companies.Select(x => new { x.CompanyId, x.Name, x.LeaderId, members = x.Members.Count, x.MembershipPolicy, x.Version }),
+            companies = snapshot.Economy.Companies.Select(x => new { x.CompanyId, x.Name, x.LeaderId, members = x.Members.ToArray(), delegatedPermissions = x.DelegatedPermissions.ToDictionary(p => p.Key, p => p.Value.Select(v => v.ToString()).ToArray()), x.MembershipPolicy, x.Liquidating, x.Version }),
+            membershipRequests = snapshot.Economy.MembershipRequests.Select(x => new { x.RequestId, kind = x.Kind.ToString(), state = x.State.ToString(), x.PlayerId, x.CompanyId, x.Version }),
             fleet = snapshot.Fleet.Select(x => new { x.AssetId, x.DisplayName, kind = x.Kind.ToString(), state = x.OperationalState.ToString(), owner = snapshot.Ownership.Single(o => o.AssetId == x.AssetId).Owner.Key, operatorRef = x.Operator?.Key, x.LastKnownLocation, x.Version }),
             market = snapshot.Market.Listings.Select(x => new { x.ListingId, kind = x.Kind.ToString(), state = x.State.ToString(), x.DefinitionId, x.LocationId, x.Price, x.ExpiresTick, x.Version }),
+            catalog = snapshot.Market.Catalog.Select(x => new { x.DefinitionId, x.CategoryId, x.BasePrice, x.TransferFee, x.BuybackRate, x.Version }),
+            marketStock = snapshot.Market.Stock.Select(x => new { x.LocationId, x.DefinitionId, x.Available, x.Capacity, x.Version }),
+            initialDeliveries = snapshot.InitialDeliveries.Select(x => new { x.GrantId, owner = x.Owner.Key, x.AssetIds, x.DefinitionIds, state = x.State.ToString(), x.FreePlacement, x.TargetTrackId, targetKind = x.TargetKind?.ToString(), x.ResultCode, x.Version }),
+            deliveryTracks = (runtimeSettings.InitialDeliveryTracks ?? new List<InitialDeliveryTrackRule>()).Select(x => new { x.TrackId, kind = x.Kind.ToString() }),
+            operatingCosts = snapshot.OperatingCosts.Select(x => new { x.SessionId, x.AssetId, action = x.Action.ToString(), payer = x.Payer.Key, state = x.State.ToString(), x.MaximumAuthorizedCost, x.ReservedAmount, x.ActualCost, settlement = x.ExternalSettlement.ToString(), x.ResultCode }),
             leases = snapshot.Leases.Select(x => new { x.LeaseId, state = x.State.ToString(), x.AssetIds, lessee = x.Lessee?.Key, payer = x.Payer?.Key, x.HeldDeposit, x.RentAmount, x.NextDueTick, x.OutstandingDebt, x.Version }),
             assignments = snapshot.Assignments.Select(x => new { x.AssignmentId, x.MissionId, kind = x.Kind.ToString(), state = x.State.ToString(), x.AssetIds, operatorRef = x.Operator.Key, x.ActualRevenue, settlement = x.ExternalSettlement.ToString(), x.Version }),
             industrial = new { enabled = runtimeSettings.EnableIndustrialPilot, stocks = snapshot.IndustrialStocks.Select(x => new { x.FacilityId, x.CargoId, x.OnHand, x.Capacity, x.ReservedOutbound, x.ReservedInbound, x.Version }), contracts = snapshot.IndustrialContracts.Select(x => new { x.ContractId, x.OriginFacilityId, x.DestinationFacilityId, x.CargoId, x.Quantity, x.DeliveredQuantity, x.PaidAmount, state = x.State.ToString(), x.Version }) },
@@ -1574,18 +1673,107 @@ public static class Main
     private static string HandleRemoteDispatchIntent(string transportIdentity, string payload)
     {
         RequireHostAuthority(); if (payload.Length > 4096) throw new ArgumentException("BDVM intent payload is too large."); var body = Newtonsoft.Json.Linq.JObject.Parse(payload); var action = (string?)body["action"] ?? ""; var correlation = (string?)body["correlationId"] ?? Guid.NewGuid().ToString("N"); if (correlation.Length > 96) throw new ArgumentException("Correlation ID is too long.");
-        object result;
+        object result; var saveStaged = false;
         if (action == "fleet.set-state")
         {
             var assetId = (string?)body["assetId"] ?? ""; if (!Enum.TryParse((string?)body["state"], true, out FleetOperationalState target)) throw new ArgumentException("Invalid fleet state.");
             var record = runtimeStateProvider!.ManageLocalFleet("remote-fleet:" + correlation, assetId, FleetCommandAction.SetOperationalState, runtimeRoleDetector!, target); result = new { action, record.Outcome, record.ResultCode, record.AssetId, record.FleetVersionAfter };
+        }
+        else if (action == "fleet.rename")
+        {
+            var assetId = (string?)body["assetId"] ?? ""; var displayName = (string?)body["displayName"] ?? "";
+            var record = runtimeStateProvider!.ManageLocalFleet("remote-fleet-rename:" + correlation, assetId, FleetCommandAction.Rename, runtimeRoleDetector!, displayName: displayName); result = new { action, record.Outcome, record.ResultCode, record.AssetId, record.FleetVersionAfter };
+        }
+        else if (action == "company.create")
+        {
+            var name = (string?)body["name"] ?? "";
+            var record = runtimeStateProvider!.CreateCompanyFor("remote-company-create:" + correlation, runtimeStateProvider.LocalPlayerId!, name); result = new { action, record.State, record.ResultCode, record.CompanyId };
+        }
+        else if (action == "company.apply")
+        {
+            var companyId = (string?)body["companyId"] ?? ""; var record = runtimeStateProvider!.ApplyToCompanyFor("remote-company-apply:" + correlation, runtimeStateProvider.LocalPlayerId!, companyId, runtimeRoleDetector!); result = new { action, record.State, record.ResultCode, record.CompanyId };
+        }
+        else if (action == "company.invite")
+        {
+            var companyId = (string?)body["companyId"] ?? ""; var targetPlayerId = (string?)body["targetPlayerId"] ?? ""; var record = runtimeStateProvider!.InvitePlayerFor("remote-company-invite:" + correlation, runtimeStateProvider.LocalPlayerId!, companyId, targetPlayerId, runtimeRoleDetector!); result = new { action, record.State, record.ResultCode, record.CompanyId };
+        }
+        else if (action == "company.decide-application")
+        {
+            var requestId = (string?)body["requestId"] ?? ""; var accept = (bool?)body["accept"] ?? false; var record = runtimeStateProvider!.DecideApplicationFor("remote-company-decision:" + correlation, runtimeStateProvider.LocalPlayerId!, requestId, accept, runtimeRoleDetector!); result = new { action, record.State, record.ResultCode, record.CompanyId };
+        }
+        else if (action == "company.respond-invitation")
+        {
+            var requestId = (string?)body["requestId"] ?? ""; var accept = (bool?)body["accept"] ?? false; var record = runtimeStateProvider!.RespondToInvitationFor("remote-company-response:" + correlation, runtimeStateProvider.LocalPlayerId!, requestId, accept, runtimeRoleDetector!); result = new { action, record.State, record.ResultCode, record.CompanyId };
+        }
+        else if (action == "company.leave")
+        {
+            var record = runtimeStateProvider!.LeaveCompanyFor("remote-company-leave:" + correlation, runtimeStateProvider.LocalPlayerId!, runtimeRoleDetector!); result = new { action, record.State, record.ResultCode, record.CompanyId };
+        }
+        else if (action == "company.policy")
+        {
+            var companyId = (string?)body["companyId"] ?? ""; if (!Enum.TryParse((string?)body["policy"], true, out MembershipPolicy policy)) throw new ArgumentException("Invalid membership policy.");
+            var record = runtimeStateProvider!.SetMembershipPolicyFor("remote-company-policy:" + correlation, runtimeStateProvider.LocalPlayerId!, companyId, policy, runtimeRoleDetector!); result = new { action, record.State, record.ResultCode, record.CompanyId };
+        }
+        else if (action == "company.permission")
+        {
+            var companyId = (string?)body["companyId"] ?? ""; var memberId = (string?)body["memberId"] ?? ""; var enabled = (bool?)body["enabled"] ?? false; if (!Enum.TryParse((string?)body["permission"], true, out CompanyPermission permission)) throw new ArgumentException("Invalid company permission.");
+            var record = runtimeStateProvider!.SetPermissionFor("remote-company-permission:" + correlation, runtimeStateProvider.LocalPlayerId!, companyId, memberId, permission, enabled, runtimeRoleDetector!); result = new { action, record.State, record.ResultCode, record.CompanyId };
+        }
+        else if (action == "company.transfer-leadership")
+        {
+            var companyId = (string?)body["companyId"] ?? ""; var memberId = (string?)body["memberId"] ?? ""; var record = runtimeStateProvider!.TransferLeadershipFor("remote-company-leadership:" + correlation, runtimeStateProvider.LocalPlayerId!, companyId, memberId, runtimeRoleDetector!); result = new { action, record.State, record.ResultCode, record.CompanyId };
+        }
+        else if (action == "wallet.transfer")
+        {
+            var amount = (long?)body["amount"] ?? 0; var toCompany = (bool?)body["toCompany"] ?? false; if (amount <= 0) throw new ArgumentException("Transfer amount must be a positive whole number.");
+            TrySynchronizeHostWallet(mod!, "before-remote-company-transfer"); var externalChanged = false;
+            try
+            {
+                if (toCompany) { if (!hostWallet.TryDebit(amount)) throw new InvalidOperationException("The authoritative personal wallet has insufficient funds."); externalChanged = true; }
+                var record = runtimeStateProvider!.TransferLocalCompany("remote-company-transfer:" + correlation, amount, toCompany);
+                if (record.State != CommandState.Succeeded) throw new InvalidOperationException(record.ResultCode);
+                if (!toCompany) { hostWallet.Credit(amount); externalChanged = true; }
+                if (!SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance))
+                {
+                    var compensation = runtimeStateProvider.TransferLocalCompany("remote-company-transfer-compensation:" + correlation, amount, !toCompany);
+                    if (compensation.State != CommandState.Succeeded) throw new InvalidOperationException("Save staging and transfer compensation both failed.");
+                    if (toCompany) hostWallet.Credit(amount);
+                    else if (!hostWallet.TryDebit(amount)) throw new InvalidOperationException("Save staging failed and the vanilla withdrawal could not be reversed.");
+                    externalChanged = false;
+                    throw new InvalidOperationException("Save staging failed; transfer was compensated.");
+                }
+                saveStaged = true;
+                result = new { action, record.State, record.ResultCode, amount, toCompany };
+            }
+            catch
+            {
+                if (externalChanged)
+                {
+                    if (toCompany) hostWallet.Credit(amount);
+                    else if (!hostWallet.TryDebit(amount)) mod?.Logger.Error("[correlation=" + correlation + "] [event=remote-company-transfer-compensation-failed] amount=" + amount);
+                }
+                TrySynchronizeHostWallet(mod!, "after-remote-company-transfer-refusal"); throw;
+            }
+        }
+        else if (action == "market.purchase")
+        {
+            var listingId = (string?)body["listingId"] ?? ""; var forCompany = (bool?)body["forCompany"] ?? false; var listing = runtimeStateProvider!.Current!.Market.Listings.Single(x => x.ListingId == listingId); var externalDebited = false;
+            if (!forCompany && listing.Price > 0) { if (!hostWallet.TryDebit(listing.Price)) throw new InvalidOperationException("The authoritative personal wallet has insufficient funds."); externalDebited = true; }
+            var record = runtimeStateProvider.PurchaseLocalMarket("remote-market-purchase:" + correlation, listingId, forCompany, runtimeRoleDetector!, new UnityExistingVehicleOwnershipAdapter(), new DisabledMarketDeliveryPort());
+            if (externalDebited && (record.State == MarketPurchaseState.Rejected || record.State == MarketPurchaseState.Compensated)) hostWallet.Credit(listing.Price);
+            result = new { action, record.State, record.ResultCode, record.ListingId, record.AssetId, record.DeliveryOperationId };
+        }
+        else if (action == "initial-delivery.place")
+        {
+            var grantId = (string?)body["grantId"] ?? ""; var trackId = (string?)body["trackId"] ?? ""; if (!Enum.TryParse((string?)body["targetKind"], true, out InitialDeliveryTargetKind targetKind)) throw new ArgumentException("Invalid initial delivery target kind.");
+            var record = runtimeStateProvider!.PlaceLocalInitialDelivery("remote-initial-delivery:" + correlation, grantId, trackId, targetKind, runtimeRoleDetector!, new UnityInitialDeliveryAdapter(runtimeSettings.InitialDeliveryTracks)); result = new { action, record.State, record.ResultCode, record.GrantId, record.AssetIds, record.TargetTrackId };
         }
         else if (action == "assignment.cancel")
         {
             var assignmentId = (string?)body["assignmentId"] ?? ""; var record = runtimeStateProvider!.CancelLocalAssignment("remote-assignment-cancel:" + correlation, assignmentId, runtimeRoleDetector!, new ManualMissionCompletionPort()); result = new { action, record.AssignmentId, state = record.State.ToString(), record.ResultCode };
         }
         else throw new ArgumentException("Unsupported BDVM intent.");
-        if (!SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance)) throw new InvalidOperationException("BDVM intent succeeded in memory but could not be staged in SaveGameData.");
+        if (!saveStaged && !SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance)) throw new InvalidOperationException("BDVM intent succeeded in memory but could not be staged in SaveGameData.");
         mod?.Logger.Log("[correlation=" + correlation + "] [event=remote-dispatch-intent] transportIdentity=" + transportIdentity + ", authorityActor=" + runtimeStateProvider!.LocalPlayerId + ", action=" + action);
         return Newtonsoft.Json.JsonConvert.SerializeObject(new { status = "succeeded", correlationId = correlation, result });
     }
