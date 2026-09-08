@@ -1800,6 +1800,13 @@ public static class Main
                 runtimeStateProvider!.AdvanceFiniteMarket(checked(snapshot.Market.ClockTick + 100), runtimeRoleDetector!, new UnityExistingVehicleOwnershipAdapter());
             });
 
+            Check("create affordable destructive market fixture", () =>
+            {
+                var fixtureId = "BDVM.DevValidation." + correlation.Substring(correlation.LastIndexOf(':') + 1);
+                runtimeStateProvider!.ConfigureFiniteMarketDefinition(fixtureId, "Freight", 1, 0, 1m, 1m, 0.5m, "DevValidationYard", 1);
+                runtimeStateProvider.GenerateFiniteMarketOrder("dev-market-listing:" + correlation, fixtureId, "DevValidationYard", runtimeRoleDetector!, new UnityExistingVehicleOwnershipAdapter());
+            });
+
             var affordableListing = snapshot.Market.Listings
                 .Where(x => x.State == MarketListingState.Available && x.Price <= hostWallet.ReadBalance())
                 .OrderBy(x => x.Price)
@@ -1881,6 +1888,7 @@ public static class Main
         try
         {
             var result = runtimeStateProvider!.TransferLocalCompany(commandId, amount, toCompany);
+            if (result.State == CommandState.Rejected) return;
             throw new InvalidOperationException("Transfer unexpectedly returned " + result.State + " / " + result.ResultCode + ".");
         }
         catch (ArgumentException) { }
