@@ -4,7 +4,9 @@ using System.IO;
 using System.Linq;
 using BDVM.Adapters;
 using BDVM.Domain;
+using BDVM.Management;
 using BDVM.PassengerJobsBridge;
+using BDVM.Web;
 using DV.Logic.Job;
 using HarmonyLib;
 using MPAPI;
@@ -129,6 +131,10 @@ public static class Main
     private static MultiplayerServerProtocolAdapter? serverProtocol;
     private static MultiplayerClientProtocolAdapter? clientProtocol;
     private static InGameCompanyWindow? inGameWindow;
+    private static WebModuleHost? managementWebModules;
+    private static WebSessionRegistry? managementWebSessions;
+    private static WebIntentGateway? managementWebIntents;
+    private static ManagementAuthorityGateway? managementAuthority;
 
     public static bool Load(UnityModManager.ModEntry modEntry)
     {
@@ -146,6 +152,7 @@ public static class Main
         modEntry.OnUpdate = OnUpdate;
         ConfigureInGameWindow(modEntry);
         RemoteDispatchBridge.Configure(BuildRemoteDispatchState, HandleRemoteDispatchIntent);
+        ConfigureManagementWeb(modEntry);
         WorldStreamingInit.LoadingFinished += OnWorldLoadingFinished;
         runtimeSettings = RuntimeSaveSettings.Load(
             Path.Combine(modEntry.Path, "runtime-settings.json"),
@@ -194,6 +201,17 @@ public static class Main
             if (MultiplayerAPI.Client != null) ConfigureMultiplayerClient(MultiplayerAPI.Client);
         }
         return true;
+    }
+
+    private static void ConfigureManagementWeb(UnityModManager.ModEntry entry)
+    {
+        var port = new RuntimeManagementPort(BuildRemoteDispatchState, HandleRemoteDispatchIntent);
+        managementAuthority = new ManagementAuthorityGateway(port);
+        managementWebModules = new WebModuleHost();
+        var loaded = managementWebModules.Load(new ManagementWebModule());
+        managementWebSessions = new WebSessionRegistry();
+        managementWebIntents = new WebIntentGateway(managementWebModules, managementWebSessions, new ManagementAuthoritativeWebIntentExecutor(port));
+        entry.Logger.Log("[correlation=management-web] [event=composition-ready] module=" + loaded.ModuleId + ", state=" + loaded.State + ", code=" + loaded.Code + ", authority=host-only, transport=adapter");
     }
 
     private static void ConfigureInGameWindow(UnityModManager.ModEntry entry)
@@ -311,7 +329,7 @@ public static class Main
         if (runtimeSettings.EnableWalletBridge)
             TrySynchronizeHostWallet(entry, "world-load");
         SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance);
-        status = "BDVM 2.2.0 ready for " + player.PlayerId + ".";
+        status = "BDVM 2.3.0 ready for " + player.PlayerId + ".";
         entry.Logger.Log("[correlation=runtime-bootstrap] Runtime state ready; player=" + player.PlayerId + ", legacyBalancePolicy=host-keeps-existing-balance, walletBridge=" + runtimeSettings.EnableWalletBridge + ", transfers=" + runtimeSettings.EnableCompanyTransfers + ", acquisition=" + runtimeSettings.EnableVehicleAcquisition + ".");
         entry.Logger.Log("[correlation=wallet-migration] [event=wallet-migration-policy] policy=host-keeps-existing-balance-v1, player=" + player.PlayerId + ", observedVanillaBalance=" + legacyBalance + ", remotePlayerInitialBalance=0");
         if (runtimeSettings.VerboseLogging)
@@ -343,7 +361,7 @@ public static class Main
 
     private static void DrawCompanyPanel(UnityModManager.ModEntry entry)
     {
-        GUILayout.Label("BDVM 2.2.0 — modular economy build; strict rolling-stock population policy available");
+        GUILayout.Label("BDVM 2.3.0 — modular economy build; strict rolling-stock population policy available");
         GUILayout.Label("SaveGameData hook: " + (SaveGameRuntimeHook.Enabled ? "enabled" : "disabled"));
         GUILayout.Label("World population: " + UnityWorldPopulationControl.State + " / " + UnityWorldPopulationControl.ResultCode);
         GUILayout.Label("Read-only output: " + Path.Combine(entry.Path, "diagnostics"));
@@ -1652,7 +1670,7 @@ public static class Main
         RequireHostAuthority(); var snapshot = runtimeStateProvider?.Current ?? throw new InvalidOperationException("BDVM career state is unavailable."); var playerId = runtimeStateProvider!.LocalPlayerId!;
         var payload = new
         {
-            schema = "bdvm.remote-dispatch", schemaVersion = 2, release = "2.2.0", transportIdentity, authorityActor = playerId,
+            schema = "bdvm.remote-dispatch", schemaVersion = 2, release = "2.3.0", transportIdentity, authorityActor = playerId,
             supportedIntents = new[] { "fleet.set-state", "fleet.rename", "company.create", "company.apply", "company.invite", "company.decide-application", "company.respond-invitation", "company.leave", "company.policy", "company.permission", "company.transfer-leadership", "wallet.transfer", "market.purchase", "initial-delivery.place", "assignment.cancel" },
             wallets = snapshot.Economy.Wallets.Select(x => new { account = x.Account.Key, x.Balance, x.Version }),
             companies = snapshot.Economy.Companies.Select(x => new { x.CompanyId, x.Name, x.LeaderId, members = x.Members.ToArray(), delegatedPermissions = x.DelegatedPermissions.ToDictionary(p => p.Key, p => p.Value.Select(v => v.ToString()).ToArray()), x.MembershipPolicy, x.Liquidating, x.Version }),
@@ -1779,6 +1797,81 @@ public static class Main
         else if (action == "assignment.cancel")
         {
             var assignmentId = (string?)body["assignmentId"] ?? ""; var record = runtimeStateProvider!.CancelLocalAssignment("remote-assignment-cancel:" + correlation, assignmentId, runtimeRoleDetector!, new ManualMissionCompletionPort()); result = new { action, record.AssignmentId, state = record.State.ToString(), record.ResultCode };
+        }
+        else if (action == "company.dissolve")
+        {
+            var player = runtimeStateProvider!.Current!.Economy.Players.Single(x => x.PlayerId == runtimeStateProvider.LocalPlayerId); var companyId = (string?)body["companyId"] ?? player.CompanyId ?? "";
+            var debts = runtimeStateProvider.Current.Financing.Contracts.Where(x => x.Debtor.Key == AccountRef.Company(companyId).Key && x.State != FinancingState.Settled && x.State != FinancingState.Cancelled && x.State != FinancingState.WrittenOff).Sum(x => checked(x.OutstandingPrincipal + x.AccruedInterest));
+            var guard = new UnityAssetReleaseGuard(); var record = runtimeStateProvider.DissolveCompanyFor("remote-company-dissolve:" + correlation, player.PlayerId, companyId, debts, 0, runtimeRoleDetector!, guard, new UnityExistingVehicleOwnershipAdapter(), new CompositeCompanyContractCancellationPort(new CompanyWorkflowCancellationPort(runtimeStateProvider.Current, runtimeRoleDetector!), new OutboundLeaseCompanyContractCancellationPort(runtimeStateProvider.Current, runtimeRoleDetector!, guard, new DeclaredOffSceneLeaseSimulationPort()), new FinancingCompanyContractCancellationPort(runtimeStateProvider.Current, runtimeRoleDetector!)), new SaveGameLiquidationCheckpointPort(mod!));
+            result = new { action, record.CommandId, record.CompanyId, state = record.State.ToString(), record.ResultCode, liabilities = debts };
+        }
+        else if (action == "fleet.bundle")
+        {
+            var ids = body["assetIds"]?.Values<string>().Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x!).ToArray() ?? Array.Empty<string>(); var bundle = runtimeStateProvider!.CreateLocalBundle("remote-fleet-bundle:" + correlation, ids, runtimeRoleDetector!); result = new { action, bundle.BundleId, bundle.ComponentAssetIds };
+        }
+        else if (action == "fleet.resale")
+        {
+            var operation = (string?)body["operation"] ?? "prepare"; var quoteId = (string?)body["quoteId"] ?? "resale-quote:" + correlation;
+            if (operation == "prepare") { var assetId = (string?)body["assetId"] ?? ""; var proceeds = (long?)body["proceeds"] ?? 0; var quote = runtimeStateProvider!.PrepareLocalResaleQuote(quoteId, assetId, proceeds, runtimeRoleDetector!, new UnityAssetReleaseGuard(), new UnityExistingVehicleOwnershipAdapter()); result = new { action, operation, quote.QuoteId, quote.AssetId, quote.Proceeds, quote.Version }; }
+            else if (operation == "sell") { var sale = runtimeStateProvider!.SellLocalVehicle("remote-fleet-resale:" + correlation, quoteId, runtimeRoleDetector!, new UnityAssetReleaseGuard(), new UnityExistingVehicleOwnershipAdapter()); result = new { action, operation, sale.CommandId, sale.QuoteId, state = sale.State.ToString(), sale.ResultCode }; }
+            else throw new ArgumentException("Unsupported resale operation.");
+        }
+        else if (action == "fleet.maintenance")
+        {
+            var operation = (string?)body["operation"] ?? "begin"; var sessionId = (string?)body["sessionId"] ?? "maintenance:" + correlation;
+            if (operation == "begin") { if (!Enum.TryParse((string?)body["maintenanceAction"], true, out MaintenanceAction maintenance)) throw new ArgumentException("Invalid maintenance action."); var record = runtimeStateProvider!.BeginLocalOperatingCost(sessionId, (string?)body["assetId"] ?? "", maintenance, (bool?)body["forCompany"] ?? false, (long?)body["maximumCost"] ?? 0, hostWallet.ReadBalance(), (decimal?)body["condition"] ?? 1m, (string?)body["tripId"], runtimeRoleDetector!); result = new { action, operation, record.SessionId, state = record.State.ToString(), record.ResultCode }; }
+            else if (operation == "complete") { var record = runtimeStateProvider!.CompleteLocalOperatingCost(sessionId, hostWallet.ReadBalance(), (decimal?)body["condition"] ?? 1m, runtimeRoleDetector!); result = new { action, operation, record.SessionId, state = record.State.ToString(), record.ResultCode, record.ActualCost }; }
+            else if (operation == "cancel") { var record = runtimeStateProvider!.CancelLocalOperatingCost(sessionId, hostWallet.ReadBalance(), runtimeRoleDetector!); result = new { action, operation, record.SessionId, state = record.State.ToString(), record.ResultCode }; }
+            else throw new ArgumentException("Unsupported maintenance operation.");
+        }
+        else if (action == "lease.manage")
+        {
+            var operation = (string?)body["operation"] ?? ""; var leaseId = (string?)body["leaseId"] ?? "";
+            if (operation == "accept") { var record = runtimeStateProvider!.AcceptLocalLease("remote-lease-accept:" + correlation, leaseId, (bool?)body["forCompany"] ?? false, runtimeRoleDetector!, new UnityAssetReleaseGuard(), new UnityExistingVehicleOwnershipAdapter()); result = new { action, operation, record.LeaseId, state = record.State.ToString(), record.ResultCode }; }
+            else if (operation == "return") { var record = runtimeStateProvider!.ReturnLocalLease("remote-lease-return:" + correlation, leaseId, (decimal?)body["condition"] ?? 1m, runtimeRoleDetector!, new UnityAssetReleaseGuard(), new UnityExistingVehicleOwnershipAdapter()); result = new { action, operation, record.LeaseId, state = record.State.ToString(), record.ResultCode }; }
+            else if (operation == "purchase") { var record = runtimeStateProvider!.PurchaseLocalLease("remote-lease-purchase:" + correlation, leaseId, runtimeRoleDetector!, new UnityAssetReleaseGuard(), new UnityExistingVehicleOwnershipAdapter()); result = new { action, operation, record.LeaseId, state = record.State.ToString(), record.ResultCode }; }
+            else if (operation == "publish-outbound") { var ids = body["assetIds"]?.Values<string>().Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x!).ToArray() ?? Array.Empty<string>(); var contract = runtimeStateProvider!.PublishLocalOutboundLease("remote-outbound-publish:" + correlation, (string?)body["contractId"] ?? "outbound:" + correlation, ids, (long?)body["rent"] ?? 0, (long?)body["interval"] ?? 1, (long?)body["duration"] ?? 1, (long?)body["recallFee"] ?? 0, (decimal?)body["condition"] ?? 1m, (string?)body["destination"] ?? "external-market", (string?)body["returnLocation"] ?? "service-track", runtimeRoleDetector!, new UnityAssetReleaseGuard(), new DeclaredOffSceneLeaseSimulationPort()); result = new { action, operation, contract.ContractId, state = contract.State.ToString(), contract.Version }; }
+            else if (operation == "activate-outbound") { var record = runtimeStateProvider!.ActivateLocalOutboundLease("remote-outbound-activate:" + correlation, (string?)body["contractId"] ?? "", runtimeRoleDetector!, new UnityAssetReleaseGuard(), new DeclaredOffSceneLeaseSimulationPort()); result = new { action, operation, record.ContractId, state = record.State.ToString(), record.ResultCode }; }
+            else if (operation == "return-outbound" || operation == "recall-outbound") { var contractId = (string?)body["contractId"] ?? ""; var condition = (decimal?)body["condition"] ?? 1m; var location = (string?)body["returnLocation"] ?? "service-track"; var record = operation == "recall-outbound" ? runtimeStateProvider!.RecallLocalOutboundLease("remote-outbound-recall:" + correlation, contractId, condition, location, runtimeRoleDetector!, new UnityAssetReleaseGuard(), new DeclaredOffSceneLeaseSimulationPort()) : runtimeStateProvider!.ReturnLocalOutboundLease("remote-outbound-return:" + correlation, contractId, condition, location, runtimeRoleDetector!, new UnityAssetReleaseGuard(), new DeclaredOffSceneLeaseSimulationPort()); result = new { action, operation, record.ContractId, state = record.State.ToString(), record.ResultCode }; }
+            else throw new ArgumentException("Unsupported lease operation.");
+        }
+        else if (action == "assignment.manage")
+        {
+            var operation = (string?)body["operation"] ?? ""; var assignmentId = (string?)body["assignmentId"] ?? "";
+            if (operation == "reserve") { var ids = body["assetIds"]?.Values<string>().Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x!).ToArray() ?? Array.Empty<string>(); if (!Enum.TryParse((string?)body["kind"], true, out MissionAssignmentKind kind)) throw new ArgumentException("Invalid assignment kind."); var record = runtimeStateProvider!.ReserveLocalAssignment("remote-assignment-reserve:" + correlation, string.IsNullOrWhiteSpace(assignmentId) ? "assignment:" + correlation : assignmentId, (string?)body["missionId"] ?? "", kind, ids, (bool?)body["forCompany"] ?? false, (long?)body["maximumRevenue"] ?? 0, runtimeRoleDetector!, new ManualMissionCompletionPort()); result = new { action, operation, record.AssignmentId, state = record.State.ToString(), record.ResultCode }; }
+            else if (operation == "start") { var record = runtimeStateProvider!.StartLocalAssignment("remote-assignment-start:" + correlation, assignmentId, hostWallet.ReadBalance(), runtimeRoleDetector!, new ManualMissionCompletionPort()); result = new { action, operation, record.AssignmentId, state = record.State.ToString(), record.ResultCode }; }
+            else if (operation == "complete") { var assignment = runtimeStateProvider!.Current!.Assignments.Single(x => x.AssignmentId == assignmentId); var arrived = body["assetIds"]?.Values<string>().Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x!).ToArray() ?? assignment.AssetIds.ToArray(); var record = runtimeStateProvider.CompleteLocalAssignment("remote-assignment-complete:" + correlation, assignmentId, hostWallet.ReadBalance(), arrived, runtimeRoleDetector!, new ManualMissionCompletionPort()); result = new { action, operation, record.AssignmentId, state = record.State.ToString(), record.ResultCode, record.ActualRevenue }; }
+            else if (operation == "cancel") { var record = runtimeStateProvider!.CancelLocalAssignment("remote-assignment-cancel:" + correlation, assignmentId, runtimeRoleDetector!, new ManualMissionCompletionPort()); result = new { action, operation, record.AssignmentId, state = record.State.ToString(), record.ResultCode }; }
+            else if (operation == "passenger-reserve") { var ids = body["assetIds"]?.Values<string>().Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x!).ToArray() ?? Array.Empty<string>(); var now = runtimeStateProvider!.Current!.LeaseClock.ActiveTick; var record = runtimeStateProvider.ReserveLocalPassengerService("remote-passenger-reserve:" + correlation, (string?)body["contractId"] ?? "passenger:" + correlation, (string?)body["routeId"] ?? "", (string?)body["passengerJobId"] ?? "", ids, (bool?)body["forCompany"] ?? false, (int?)body["capacity"] ?? 0, now, checked(now + ((long?)body["journeyTicks"] ?? 1)), runtimeRoleDetector!, new ManualMissionCompletionPort()); result = new { action, operation, record.ContractId, state = record.State.ToString(), record.ResultCode }; }
+            else if (operation == "passenger-start") { var record = runtimeStateProvider!.StartLocalPassengerService("remote-passenger-start:" + correlation, (string?)body["contractId"] ?? "", hostWallet.ReadBalance(), runtimeStateProvider.Current!.LeaseClock.ActiveTick, runtimeRoleDetector!, new ManualMissionCompletionPort()); result = new { action, operation, record.ContractId, state = record.State.ToString(), record.ResultCode }; }
+            else if (operation == "passenger-cancel") { var record = runtimeStateProvider!.CancelLocalPassengerService("remote-passenger-cancel:" + correlation, (string?)body["contractId"] ?? "", runtimeRoleDetector!, new ManualMissionCompletionPort()); result = new { action, operation, record.ContractId, state = record.State.ToString(), record.ResultCode }; }
+            else throw new ArgumentException("Unsupported assignment operation.");
+        }
+        else if (action == "finance.manage")
+        {
+            var operation = (string?)body["operation"] ?? ""; var contractId = (string?)body["contractId"] ?? "";
+            if (operation == "register-pool") { var pool = runtimeStateProvider!.RegisterLocalFinancingPool("remote-finance-pool:" + correlation, (string?)body["poolId"] ?? "", (long?)body["backedCapital"] ?? 0, runtimeRoleDetector!); result = new { action, operation, pool.PoolId, pool.AvailableCapital, pool.Version }; }
+            else if (operation == "offer") { if (!Enum.TryParse((string?)body["kind"], true, out FinancingKind kind)) throw new ArgumentException("Invalid financing kind."); var record = runtimeStateProvider!.OfferLocalFinancing("remote-finance-offer:" + correlation, contractId, kind, (bool?)body["forCompany"] ?? false, (string?)body["poolId"] ?? "", (long?)body["principal"] ?? 0, (int?)body["interestBasisPoints"] ?? 0, (long?)body["installment"] ?? 0, (long?)body["intervalTicks"] ?? 1, (long?)body["maturityTicks"] ?? 1, (long?)body["guarantee"] ?? 0, runtimeRoleDetector!); result = new { action, operation, record.ContractId, state = record.State.ToString(), record.Version }; }
+            else if (operation == "accept") { var record = runtimeStateProvider!.AcceptLocalFinancing("remote-finance-accept:" + correlation, contractId, runtimeRoleDetector!); result = new { action, operation, record.ContractId, state = record.State.ToString(), record.ResultCode }; }
+            else if (operation == "draw") { var record = runtimeStateProvider!.DrawLocalCredit("remote-finance-draw:" + correlation, contractId, (long?)body["amount"] ?? 0, runtimeRoleDetector!); result = new { action, operation, record.ContractId, state = record.State.ToString(), record.ResultCode }; }
+            else if (operation == "repay") { var record = runtimeStateProvider!.RepayLocalFinancing("remote-finance-repay:" + correlation, contractId, (long?)body["amount"] ?? 0, runtimeRoleDetector!); result = new { action, operation, record.ContractId, state = record.State.ToString(), record.ResultCode }; }
+            else throw new ArgumentException("Unsupported finance operation.");
+        }
+        else if (action == "yard.manage")
+        {
+            var operation = (string?)body["operation"] ?? ""; var planId = (string?)body["planId"] ?? "";
+            if (operation == "create") { var tracks = body["trackIds"]?.Values<string>().Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x!).ToArray() ?? Array.Empty<string>(); var plan = runtimeStateProvider!.CreateLocalTriagePlan("remote-yard-create:" + correlation, planId, (string?)body["assignmentId"] ?? "", tracks, runtimeRoleDetector!); result = new { action, operation, plan.PlanId, state = plan.State.ToString(), plan.ResultCode }; }
+            else if (operation == "cancel") { var plan = runtimeStateProvider!.CancelLocalTriagePlan("remote-yard-cancel:" + correlation, planId, runtimeRoleDetector!); result = new { action, operation, plan.PlanId, state = plan.State.ToString(), plan.ResultCode }; }
+            else throw new ArgumentException("Unsupported yard operation.");
+        }
+        else if (action == "industry.manage")
+        {
+            var operation = (string?)body["operation"] ?? ""; var contractId = (string?)body["contractId"] ?? ""; var engine = new IndustrialEconomyEngine(runtimeStateProvider!.Current!, runtimeRoleDetector!, new DisabledIndustrialExecutionPort()); var contract = runtimeStateProvider.Current!.IndustrialContracts.Single(x => x.ContractId == contractId);
+            if (operation == "accept") contract = engine.Accept("remote-industry-accept:" + correlation, contractId, contract.Version, runtimeStateProvider.Current.LeaseClock.ActiveTick, (long?)body["preparationDuration"] ?? 1, null);
+            else if (operation == "activate") contract = engine.Activate("remote-industry-activate:" + correlation, contractId, runtimeStateProvider.Current.LeaseClock.ActiveTick);
+            else if (operation == "cancel") contract = engine.Cancel("remote-industry-cancel:" + correlation, contractId);
+            else throw new ArgumentException("Unsupported industry operation or adapter unavailable.");
+            result = new { action, operation, contract.ContractId, state = contract.State.ToString(), contract.Version };
         }
         else throw new ArgumentException("Unsupported BDVM intent.");
         if (!saveStaged && !SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance)) throw new InvalidOperationException("BDVM intent succeeded in memory but could not be staged in SaveGameData.");

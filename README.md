@@ -7,7 +7,7 @@
 | Property | Value |
 | --- | --- |
 | Module kind | Integration bundle |
-| Manifest version | 2.2.0 |
+| Manifest version | 2.3.0 |
 | Target framework | .NET Framework 4.8 (`net48`) |
 | Mod loader | Unity Mod Manager 0.27.3 or compatible |
 | Current declared requirements | `Multiplayer`, `SelfShunt`, `PassengerJobs`, `RemoteDispatchLive` |
@@ -20,6 +20,8 @@ The bundle references `BDVM.Common`, `BDVM.Core`, `BDVM.Companies`, `BDVM.Fleet`
 Feature domain and integration files remain owned by their module repositories. `BDVM.Full.csproj` links the sources that are not yet emitted by standalone module packages, preventing duplicate runtime types while preserving repository ownership.
 
 ## Responsibilities and current capabilities
+
+The 2.3.0 composition binds `BDVM.Management` snapshots and intents to the authoritative runtime through a transport-independent adapter. Company, wallet, fleet, market, delivery, leasing, assignment, passenger, financing, yard and available industrial actions execute on the host and use the existing save boundary.
 
 - Initialize host-authoritative player, company and wallet state from the loaded career.
 - Persist BDVM checkpoints through the Derail Valley save hook.

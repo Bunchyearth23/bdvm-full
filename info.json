@@ -1,8 +1,8 @@
 {
   "Id": "BDVM.Full",
-  "Version": "2.2.0",
+  "Version": "2.3.0",
   "DisplayName": "BDVM - Full",
-  "Author": "Arnaud",
+  "Author": "Bunchy (Bunchyearth23)",
   "EntryMethod": "BDVM.Main.Load",
   "ManagerVersion": "0.27.3",
   "Requirements": [ "Multiplayer", "SelfShunt", "PassengerJobs", "RemoteDispatchLive" ]
