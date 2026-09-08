@@ -26,6 +26,8 @@ Feature domain and integration files remain owned by their module repositories. 
 
 The 0.3.0 composition binds `BDVM.Management` snapshots and intents to the authoritative runtime through a transport-independent adapter. Company, wallet, fleet, market, delivery, leasing, assignment, passenger, financing, yard and available industrial actions execute on the host and use the existing save boundary.
 
+Starter rolling stock is delivered with the native comms radio. Select **BDVM DELIVERY**, use the radio A/B buttons to choose the next owned vehicle, aim at an empty depot or service track in the current station, and press Use. The default DE2 and three flatcars are delivered one vehicle at a time, and every successful placement is persisted before it can be repeated.
+
 - Initialize host-authoritative player, company and wallet state from the loaded career.
 - Persist BDVM checkpoints through the Derail Valley save hook.
 - Manage company creation, membership, funds and economic diagnostics.

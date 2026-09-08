@@ -153,6 +153,7 @@ public static class Main
         modEntry.OnGUI = OnGui;
         modEntry.OnUpdate = OnUpdate;
         ConfigureInGameWindow(modEntry);
+        BDVMStarterDeliveryRadio.Configure(PendingInitialDeliveries, DeliverFromRadio);
         RemoteDispatchBridge.Configure(BuildRemoteDispatchState, HandleRemoteDispatchIntent);
         ConfigureManagementWeb(modEntry);
         WorldStreamingInit.LoadingFinished += OnWorldLoadingFinished;
@@ -331,7 +332,7 @@ public static class Main
         if (starterDefinitions.Count > 0)
         {
             var starter = runtimeStateProvider.GrantLocalStarterBundle("starter-bundle:" + player.PlayerId, starterDefinitions, runtimeRoleDetector!);
-            entry.Logger.Log("[correlation=runtime-bootstrap] [event=starter-bundle] player=" + player.PlayerId + ", grant=" + starter.GrantId + ", components=" + string.Join(",", starter.DefinitionIds) + ", state=" + starter.State);
+            entry.Logger.Log("[correlation=runtime-bootstrap] [event=starter-bundle] player=" + player.PlayerId + ", firstGrant=" + starter.GrantId + ", deliveryMode=one-vehicle-per-radio-placement, components=" + string.Join(",", starterDefinitions) + ", state=" + starter.State);
         }
         if (runtimeSettings.EnableWalletBridge)
             TrySynchronizeHostWallet(entry, "world-load");
@@ -919,13 +920,27 @@ public static class Main
         try
         {
             RequireHostAuthority();
-            var adapter = new UnityInitialDeliveryAdapter(runtimeSettings.InitialDeliveryTracks);
+            // The in-game radio supplies a validated one-shot track rule; configured rules remain
+            // supported for the legacy/debug panel.
+            var adapter = new UnityInitialDeliveryAdapter((runtimeSettings.InitialDeliveryTracks ?? new List<InitialDeliveryTrackRule>()).Concat(new[] { rule }));
             var result = runtimeStateProvider!.PlaceLocalInitialDelivery("initial-delivery:" + correlation, grant.GrantId, rule.TrackId, rule.Kind, runtimeRoleDetector!, adapter, new SaveGameInitialDeliveryCheckpointPort(entry));
             if (!SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance)) throw new InvalidOperationException("Initial delivery state could not be staged in SaveGameData.");
             status = "Initial delivery: " + result.State + " / " + result.ResultCode + ".";
             entry.Logger.Log("[correlation=" + correlation + "] [event=initial-delivery] grant=" + result.GrantId + ", owner=" + result.Owner.Key + ", track=" + result.TargetTrackId + ", kind=" + result.TargetKind + ", components=" + string.Join(",", result.AssetIds) + ", state=" + result.State + ", result=" + result.ResultCode);
         }
         catch (Exception exception) { status = "Initial delivery refused: " + exception.Message; entry.Logger.Error("[correlation=" + correlation + "] [event=initial-delivery-refused] grant=" + grant.GrantId + ", track=" + rule.TrackId + ", error=" + exception); }
+    }
+
+    private static IReadOnlyList<InitialDeliveryGrant> PendingInitialDeliveries() => runtimeStateProvider?.Current?.InitialDeliveries
+        ?.Where(x => x.State != InitialDeliveryState.Delivered).ToArray() ?? Array.Empty<InitialDeliveryGrant>();
+
+    private static string DeliverFromRadio(RailTrack track, InitialDeliveryTargetKind kind, InitialDeliveryGrant grant)
+    {
+        if (mod == null) return "BDVM is not ready.";
+        var trackId = track.LogicTrack()?.ID?.ToString();
+        if (string.IsNullOrWhiteSpace(trackId)) return "Track identity is unavailable.";
+        PlaceInitialDelivery(mod, grant, new InitialDeliveryTrackRule { TrackId = trackId!, Kind = kind });
+        return status;
     }
 
     private static void ReconcileInitialDeliveries(UnityModManager.ModEntry entry)

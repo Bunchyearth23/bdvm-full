@@ -45,14 +45,18 @@
     <Reference Include="DV.ThingTypes" Private="false" />
     <Reference Include="DV.Inventory" Private="false" />
     <Reference Include="DV.Interaction" Private="false" />
+    <Reference Include="DV.PointSet" Private="false" />
     <Reference Include="DV.RailTrack" Private="false" />
     <Reference Include="DV.Common" Private="false" />
     <Reference Include="DV.UserManagement" Private="false" />
     <Reference Include="DV.Utils" Private="false" />
     <Reference Include="Newtonsoft.Json" HintPath="$(GameDir)\DerailValley_Data\Managed\Newtonsoft.Json.dll" Private="false" />
+    <Reference Include="net.smkd.vector3d" Private="false" />
     <Reference Include="UnityEngine.CoreModule" Private="false" />
     <Reference Include="UnityEngine.IMGUIModule" Private="false" />
     <Reference Include="UnityEngine.InputLegacyModule" Private="false" />
+    <Reference Include="UnityEngine.PhysicsModule" Private="false" />
+    <Reference Include="Unity.TextMeshPro" Private="false" />
     <Reference Include="UnityModManager" HintPath="$(GameDir)\DerailValley_Data\Managed\UnityModManager\UnityModManager.dll" Private="false" />
     <Reference Include="MultiplayerAPI" HintPath="$(MultiplayerApiPath)" Private="false" />
   </ItemGroup>
