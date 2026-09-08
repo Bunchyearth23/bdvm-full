@@ -34,7 +34,6 @@ internal sealed class UnityInitialDeliveryAdapter : IInitialDeliveryPort
             var track = ResolveTrack(trackId);
             var liveries = ResolveLiveries(definitionIds);
             if (CarSpawner.Instance == null || CarSpawner.Instance.PoolSetupInProgress) return Unknown("car-spawner-not-ready");
-            if (CarSpawner.Instance.AllCars.Any(x => x != null && (x.FrontBogie?.track == track || x.RearBogie?.track == track))) return Refused("delivery-track-occupied");
             var required = CarSpawner.Instance.GetTotalCarLiveriesLength(liveries, true) + 20f;
             if (track.curve == null || track.curve.length < required) return Refused("delivery-track-too-short");
             return Applied(Array.Empty<string>(), "preflight-approved");
