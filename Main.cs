@@ -375,7 +375,7 @@ public static class Main
             try { status = "Exported observation: " + diagnostic!.ExportVisibilityObservation(); }
             catch (Exception exception) { status = "Observation failed: " + exception.Message; }
         }
-        if (GUILayout.Button("Run all safe in-game validation checks"))
+        if (GUILayout.Button("Run complete destructive dev-save validation"))
             RunAutomatedInGameValidation(entry);
         GUILayout.Label(status);
 
@@ -1666,6 +1666,7 @@ public static class Main
         var lines = new List<string>();
         var passed = 0;
         var failed = 0;
+        var skipped = 0;
 
         void Check(string name, Action validation)
         {
@@ -1680,6 +1681,12 @@ public static class Main
                 failed++;
                 lines.Add("FAIL | " + name + " | " + exception.GetType().Name + ": " + exception.Message);
             }
+        }
+
+        void Skip(string name, string reason)
+        {
+            skipped++;
+            lines.Add("SKIP | " + name + " | " + reason);
         }
 
         var snapshot = runtimeStateProvider?.Current;
@@ -1728,6 +1735,126 @@ public static class Main
                     throw new InvalidOperationException("Local player wallet is missing.");
             });
             Check("authoritative diagnostic export", () => diagnostic!.ExportAuthoritative());
+
+            Check("dev company is available", () =>
+            {
+                var local = snapshot.Economy.Players.Single(x => x.PlayerId == runtimeStateProvider!.LocalPlayerId);
+                if (string.IsNullOrWhiteSpace(local.CompanyId))
+                {
+                    var created = runtimeStateProvider!.CreateCompany("dev-validation-company:" + correlation, "BDVM Automated Validation");
+                    if (created.State != CommandState.Succeeded) throw new InvalidOperationException(created.ResultCode);
+                }
+            });
+
+            var destructivePlayer = snapshot.Economy.Players.Single(x => x.PlayerId == runtimeStateProvider!.LocalPlayerId);
+            if (!string.IsNullOrWhiteSpace(destructivePlayer.CompanyId))
+            {
+                Check("zero company transfer is refused", () => ExpectTransferRefusal("dev-zero:" + correlation, 0));
+                Check("negative company transfer is refused", () => ExpectTransferRefusal("dev-negative:" + correlation, -1));
+                Check("overdrawn company withdrawal is refused", () =>
+                {
+                    var companyWallet = snapshot.Economy.Wallets.Single(x => x.Account.Kind == AccountKind.Company && x.Account.OwnerId == destructivePlayer.CompanyId);
+                    ExpectTransferRefusal("dev-overdraw:" + correlation, checked(companyWallet.Balance + 1), false);
+                });
+
+                if (hostWallet.ReadBalance() > 0)
+                {
+                    Check("real contribution and withdrawal round trip", () =>
+                    {
+                        TrySynchronizeHostWallet(entry, "automated-validation-before-transfer");
+                        var personal = snapshot.Economy.Wallets.Single(x => x.Account.Kind == AccountKind.Player && x.Account.OwnerId == destructivePlayer.PlayerId);
+                        var companyWallet = snapshot.Economy.Wallets.Single(x => x.Account.Kind == AccountKind.Company && x.Account.OwnerId == destructivePlayer.CompanyId);
+                        var personalBefore = personal.Balance;
+                        var companyBefore = companyWallet.Balance;
+                        var externalDebited = false;
+                        var contributed = false;
+                        try
+                        {
+                            if (!hostWallet.TryDebit(1)) throw new InvalidOperationException("Vanilla wallet debit failed.");
+                            externalDebited = true;
+                            var contribution = runtimeStateProvider!.TransferLocalCompany("dev-contribution:" + correlation, 1, true);
+                            if (contribution.State != CommandState.Succeeded) throw new InvalidOperationException(contribution.ResultCode);
+                            contributed = true;
+                            var withdrawal = runtimeStateProvider.TransferLocalCompany("dev-withdrawal:" + correlation, 1, false);
+                            if (withdrawal.State != CommandState.Succeeded) throw new InvalidOperationException(withdrawal.ResultCode);
+                            contributed = false;
+                            hostWallet.Credit(1);
+                            externalDebited = false;
+                            if (personal.Balance != personalBefore || companyWallet.Balance != companyBefore)
+                                throw new InvalidOperationException("Round-trip balances did not return to their starting values.");
+                        }
+                        catch
+                        {
+                            if (contributed) runtimeStateProvider!.TransferLocalCompany("dev-transfer-compensation:" + correlation, 1, false);
+                            if (externalDebited) hostWallet.Credit(1);
+                            throw;
+                        }
+                    });
+                }
+                else Skip("real contribution and withdrawal round trip", "personal wallet has no available unit");
+            }
+            else Skip("company transfer mutations", "company creation was refused");
+
+            Check("advance dynamic market clock by 100 ticks", () =>
+            {
+                runtimeStateProvider!.AdvanceFiniteMarket(checked(snapshot.Market.ClockTick + 100), runtimeRoleDetector!, new UnityExistingVehicleOwnershipAdapter());
+            });
+
+            var affordableListing = snapshot.Market.Listings
+                .Where(x => x.State == MarketListingState.Available && x.Price <= hostWallet.ReadBalance())
+                .OrderBy(x => x.Price)
+                .FirstOrDefault();
+            if (affordableListing == null) Skip("real finite-market purchase", "no affordable available listing");
+            else
+            {
+                Check("real finite-market purchase", () =>
+                {
+                    TrySynchronizeHostWallet(entry, "automated-validation-before-purchase");
+                    var debited = false;
+                    var committed = false;
+                    try
+                    {
+                        if (affordableListing.Price > 0 && !hostWallet.TryDebit(affordableListing.Price))
+                            throw new InvalidOperationException("Vanilla wallet debit failed.");
+                        debited = affordableListing.Price > 0;
+                        var purchase = runtimeStateProvider!.PurchaseLocalMarket("dev-market-purchase:" + correlation, affordableListing.ListingId, false, runtimeRoleDetector!, new UnityExistingVehicleOwnershipAdapter(), new DisabledMarketDeliveryPort());
+                        committed = purchase.State == MarketPurchaseState.Succeeded || purchase.State == MarketPurchaseState.ReconcileRequired;
+                        if (!committed) throw new InvalidOperationException(purchase.ResultCode);
+                    }
+                    catch
+                    {
+                        if (debited && !committed) hostWallet.Credit(affordableListing.Price);
+                        throw;
+                    }
+                });
+            }
+
+            destructivePlayer = snapshot.Economy.Players.Single(x => x.PlayerId == runtimeStateProvider!.LocalPlayerId);
+            var destructiveCompany = string.IsNullOrWhiteSpace(destructivePlayer.CompanyId)
+                ? null
+                : snapshot.Economy.Companies.Single(x => x.CompanyId == destructivePlayer.CompanyId);
+            if (destructiveCompany == null) Skip("company dissolution", "local player has no company");
+            else if (destructiveCompany.LeaderId != destructivePlayer.PlayerId && (!destructiveCompany.DelegatedPermissions.TryGetValue(destructivePlayer.PlayerId, out var rights) || !rights.Contains(CompanyPermission.Dissolve)))
+                Skip("company dissolution", "local player lacks dissolution permission");
+            else
+            {
+                Check("company dissolution, contract cancellation and asset liquidation", () =>
+                {
+                    var personal = snapshot.Economy.Wallets.Single(x => x.Account.Kind == AccountKind.Player && x.Account.OwnerId == destructivePlayer.PlayerId);
+                    var before = personal.Balance;
+                    var releaseGuard = new UnityAssetReleaseGuard();
+                    var result = runtimeStateProvider!.DissolveCompanyFor("dev-dissolution:" + correlation, destructivePlayer.PlayerId, destructiveCompany.CompanyId, 0, 0, runtimeRoleDetector!, releaseGuard, new UnityExistingVehicleOwnershipAdapter(), new CompositeCompanyContractCancellationPort(new CompanyWorkflowCancellationPort(snapshot, runtimeRoleDetector!), new OutboundLeaseCompanyContractCancellationPort(snapshot, runtimeRoleDetector!, releaseGuard, new DeclaredOffSceneLeaseSimulationPort()), new FinancingCompanyContractCancellationPort(snapshot, runtimeRoleDetector!)), new SaveGameLiquidationCheckpointPort(entry));
+                    if (result.State != CompanyLiquidationState.Succeeded) throw new InvalidOperationException(result.ResultCode);
+                    var credited = personal.Balance - before;
+                    if (credited > 0) hostWallet.Credit(credited);
+                });
+            }
+
+            Check("stage destructive validation in SaveGameData", () =>
+            {
+                if (!SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance))
+                    throw new InvalidOperationException("The mutated validation state could not be staged for save.");
+            });
         }
 
         var reportDirectory = Path.Combine(entry.Path, "diagnostics");
@@ -1738,14 +1865,26 @@ public static class Main
             "BDVM automated in-game validation",
             "UTC: " + DateTime.UtcNow.ToString("O"),
             "Correlation: " + correlation,
-            "Result: " + passed + " passed, " + failed + " failed",
+            "Mode: destructive development-save validation",
+            "Result: " + passed + " passed, " + failed + " failed, " + skipped + " skipped",
             ""
         };
         File.WriteAllLines(reportPath, header.Concat(lines));
         status = failed == 0
-            ? "Automated validation passed: " + passed + "/" + passed + ". Report: " + reportPath
-            : "Automated validation failed: " + failed + " failed, " + passed + " passed. Report: " + reportPath;
-        entry.Logger.Log("[correlation=" + correlation + "] [event=ingame-validation] passed=" + passed + ", failed=" + failed + ", report=" + reportPath);
+            ? "Destructive validation passed: " + passed + " passed, " + skipped + " skipped. Report: " + reportPath
+            : "Destructive validation failed: " + failed + " failed, " + passed + " passed, " + skipped + " skipped. Report: " + reportPath;
+        entry.Logger.Log("[correlation=" + correlation + "] [event=ingame-validation] mode=destructive, passed=" + passed + ", failed=" + failed + ", skipped=" + skipped + ", report=" + reportPath);
+    }
+
+    private static void ExpectTransferRefusal(string commandId, long amount, bool toCompany = true)
+    {
+        try
+        {
+            var result = runtimeStateProvider!.TransferLocalCompany(commandId, amount, toCompany);
+            throw new InvalidOperationException("Transfer unexpectedly returned " + result.State + " / " + result.ResultCode + ".");
+        }
+        catch (ArgumentException) { }
+        catch (InvalidOperationException exception) when (!exception.Message.StartsWith("Transfer unexpectedly returned", StringComparison.Ordinal)) { }
     }
 
     private static void RequireHostAuthority()
