@@ -893,7 +893,7 @@ public static class Main
         {
             RequireHostAuthority();
             var adapter = new UnityInitialDeliveryAdapter(runtimeSettings.InitialDeliveryTracks);
-            var result = runtimeStateProvider!.PlaceLocalInitialDelivery("initial-delivery:" + correlation, grant.GrantId, rule.TrackId, rule.Kind, runtimeRoleDetector!, adapter);
+            var result = runtimeStateProvider!.PlaceLocalInitialDelivery("initial-delivery:" + correlation, grant.GrantId, rule.TrackId, rule.Kind, runtimeRoleDetector!, adapter, new SaveGameInitialDeliveryCheckpointPort(entry));
             if (!SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance)) throw new InvalidOperationException("Initial delivery state could not be staged in SaveGameData.");
             status = "Initial delivery: " + result.State + " / " + result.ResultCode + ".";
             entry.Logger.Log("[correlation=" + correlation + "] [event=initial-delivery] grant=" + result.GrantId + ", owner=" + result.Owner.Key + ", track=" + result.TargetTrackId + ", kind=" + result.TargetKind + ", components=" + string.Join(",", result.AssetIds) + ", state=" + result.State + ", result=" + result.ResultCode);
@@ -907,7 +907,7 @@ public static class Main
         try
         {
             RequireHostAuthority();
-            var results = runtimeStateProvider!.ReconcilePendingInitialDeliveries(runtimeRoleDetector!, new UnityInitialDeliveryAdapter(runtimeSettings.InitialDeliveryTracks));
+            var results = runtimeStateProvider!.ReconcilePendingInitialDeliveries(runtimeRoleDetector!, new UnityInitialDeliveryAdapter(runtimeSettings.InitialDeliveryTracks), new SaveGameInitialDeliveryCheckpointPort(entry));
             if (!SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance)) throw new InvalidOperationException("Reconciled initial delivery state could not be staged in SaveGameData.");
             status = "Initial delivery reconciliation: " + results.Count + " record(s).";
             foreach (var result in results) entry.Logger.Log("[correlation=" + correlation + "] [event=initial-delivery-reconcile] grant=" + result.GrantId + ", state=" + result.State + ", result=" + result.ResultCode);
@@ -1774,7 +1774,7 @@ public static class Main
         else if (action == "initial-delivery.place")
         {
             var grantId = (string?)body["grantId"] ?? ""; var trackId = (string?)body["trackId"] ?? ""; if (!Enum.TryParse((string?)body["targetKind"], true, out InitialDeliveryTargetKind targetKind)) throw new ArgumentException("Invalid initial delivery target kind.");
-            var record = runtimeStateProvider!.PlaceLocalInitialDelivery("remote-initial-delivery:" + correlation, grantId, trackId, targetKind, runtimeRoleDetector!, new UnityInitialDeliveryAdapter(runtimeSettings.InitialDeliveryTracks)); result = new { action, record.State, record.ResultCode, record.GrantId, record.AssetIds, record.TargetTrackId };
+            var record = runtimeStateProvider!.PlaceLocalInitialDelivery("remote-initial-delivery:" + correlation, grantId, trackId, targetKind, runtimeRoleDetector!, new UnityInitialDeliveryAdapter(runtimeSettings.InitialDeliveryTracks), new SaveGameInitialDeliveryCheckpointPort(mod!)); result = new { action, record.State, record.ResultCode, record.GrantId, record.AssetIds, record.TargetTrackId };
         }
         else if (action == "assignment.cancel")
         {
@@ -1803,6 +1803,19 @@ public static class Main
         {
             var saved = SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance);
             entry.Logger.Log("[correlation=" + record.CommandId + "] [event=company-liquidation-checkpoint] company=" + record.CompanyId + ", phase=" + phase + ", saved=" + saved + ", contractsCancelled=" + record.ContractsCancelled + ", ownershipCommitted=" + record.OwnershipCommitted + ", economyCommitted=" + record.EconomyCommitted);
+            return saved;
+        }
+    }
+
+    private sealed class SaveGameInitialDeliveryCheckpointPort : IInitialDeliveryCheckpointPort
+    {
+        private readonly UnityModManager.ModEntry entry;
+        public SaveGameInitialDeliveryCheckpointPort(UnityModManager.ModEntry entry) => this.entry = entry;
+
+        public bool TryCheckpoint(InitialDeliveryGrant grant, string phase)
+        {
+            var saved = SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance);
+            entry.Logger.Log("[correlation=" + (grant.PlacementCommandId ?? grant.SourceCommandId) + "] [event=initial-delivery-checkpoint] grant=" + grant.GrantId + ", phase=" + phase + ", saved=" + saved + ", state=" + grant.State + ", result=" + grant.ResultCode);
             return saved;
         }
     }
