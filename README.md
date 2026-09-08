@@ -3,7 +3,7 @@
 **BDVM** stands for **Bunchy's Derail Valley Mods**, the common banner for this
 modular Derail Valley project.
 
-`BDVM.Full` is the current installable Unity Mod Manager composition of the BDVM project. It wires the modular economy, fleet, operations, web features and optional-in-architecture bridges into one Derail Valley entry point while standalone module packages are still being prepared.
+`BDVM.Full` is the current installable Unity Mod Manager composition of the BDVM project. It wires the modular economy, fleet, operations, web features and optional-in-architecture bridges into one Derail Valley entry point. Standalone module packages and the complete profile are published as beta prereleases.
 
 ## Status
 
@@ -52,7 +52,7 @@ The 0.3.0 composition binds `BDVM.Management` snapshots and intents to the autho
 
 ## Source dependencies
 
-All 14 `BDVM.*` repositories must be siblings under `src/`. Building requires a Derail Valley installation for Unity, game and Unity Mod Manager assemblies. It also requires a compatible `MultiplayerAPI.dll` and the authorized SelfShunt fork/API at the paths expected by the project. Passenger Jobs and Remote Dispatch Live are runtime dependencies, not linked build assemblies; Passenger Jobs itself requires DVLangHelper.
+All 14 `BDVM.*` repositories must be siblings under `src/`. Building requires a Derail Valley installation for Unity, game and Unity Mod Manager assemblies. It also requires compatible `MultiplayerAPI.dll`, `SelfShunt.API.dll` and `PassengerJobs.API.dll` assemblies at the paths expected by the project. `PassengerJobs`, `RemoteDispatchLive`, `Multiplayer` and `SelfShunt` are runtime dependencies of the complete profile; PassengerJobs itself requires `DVLangHelper`.
 
 ## Build
 
@@ -83,7 +83,7 @@ Validate against a disposable save until persistence compatibility is formally r
 
 ## Installation
 
-No final package is published yet. For a development install, use the output prepared by the workspace packaging process and keep the compatible Multiplayer, Remote Dispatch and SelfShunt forks aligned with the tested revisions. Do not combine unmatched module DLLs from different commits.
+Beta packages are published on GitHub. For a development install, prefer the coordinated `BDVM.Full` beta profile and keep the compatible Multiplayer, Remote Dispatch, SelfShunt and Passenger Jobs forks aligned with its preflight. Do not combine unmatched module DLLs from different release sets. No stable package is published before `1.0.0`.
 
 ## Manual beta release
 

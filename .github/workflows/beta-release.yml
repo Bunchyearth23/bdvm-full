@@ -83,6 +83,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'PassengerJobs.API build failed.' }
           dotnet build dv-selfshunt-fork/SS/SelfShunt.csproj -c Release -p:GameDir="$env:GAME_DIR"
           if ($LASTEXITCODE -ne 0) { throw 'SelfShunt build failed.' }
+          dotnet build dv-selfshunt-fork/MP/SelfShunt.MP.csproj -c Release -p:GameDir="$env:GAME_DIR" -p:MultiplayerApiPath="$env:GITHUB_WORKSPACE\dv-multiplayer-beta\MultiplayerAPI\bin\Release\net48\MultiplayerAPI.dll"
+          if ($LASTEXITCODE -ne 0) { throw 'SelfShunt.MP build failed.' }
           dotnet build dv-company/src/BDVM.Full/BDVM.Full.csproj -c Release -p:GameDir="$env:GAME_DIR"
           if ($LASTEXITCODE -ne 0) { throw 'BDVM.Full build failed.' }
 
