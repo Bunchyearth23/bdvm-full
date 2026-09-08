@@ -219,7 +219,7 @@ public static class Main
         var host = GameObject.Find("BDVM.InGameWindow") ?? new GameObject("BDVM.InGameWindow");
         UnityEngine.Object.DontDestroyOnLoad(host);
         inGameWindow = host.GetComponent<InGameCompanyWindow>() ?? host.AddComponent<InGameCompanyWindow>();
-        inGameWindow.Configure(() => DrawCompanyPanel(entry), message => entry.Logger.Log(message));
+        inGameWindow.Configure(() => DrawCompanyPanel(entry), () => status, message => entry.Logger.Log(message));
         entry.Logger.Log("[correlation=ingame-ui] [event=ui-ready] toggle=F7, persistentButton=true");
     }
 

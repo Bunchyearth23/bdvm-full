@@ -8,6 +8,7 @@ public sealed class InGameCompanyWindow : MonoBehaviour
 {
     private const int WindowId = 0x445643;
     private Action? drawContents;
+    private Func<string>? getStatus;
     private Action<string>? log;
     private Rect windowRect = new Rect(30f, 60f, 1100f, 760f);
     private GUIStyle? opaqueWindowStyle;
@@ -16,9 +17,10 @@ public sealed class InGameCompanyWindow : MonoBehaviour
     private bool visible;
     private bool worldInputBlocked;
 
-    public void Configure(Action contents, Action<string> logger)
+    public void Configure(Action contents, Func<string> statusProvider, Action<string> logger)
     {
         drawContents = contents ?? throw new ArgumentNullException(nameof(contents));
+        getStatus = statusProvider ?? throw new ArgumentNullException(nameof(statusProvider));
         log = logger;
     }
 
@@ -77,6 +79,7 @@ public sealed class InGameCompanyWindow : MonoBehaviour
         GUILayout.Label("Economic interface — visible only in mouse mode");
         if (GUILayout.Button("Close", GUILayout.Width(90f))) SetVisible(false, "close-button");
         GUILayout.EndHorizontal();
+        DrawStatusBanner();
         scroll = GUILayout.BeginScrollView(scroll);
         try { drawContents?.Invoke(); }
         catch (Exception exception)
@@ -86,6 +89,23 @@ public sealed class InGameCompanyWindow : MonoBehaviour
         }
         GUILayout.EndScrollView();
         GUI.DragWindow(new Rect(0f, 0f, windowRect.width - 100f, 28f));
+    }
+
+    private void DrawStatusBanner()
+    {
+        var message = getStatus?.Invoke() ?? "";
+        if (string.IsNullOrWhiteSpace(message)) return;
+
+        var failure = message.IndexOf("refused", StringComparison.OrdinalIgnoreCase) >= 0
+            || message.IndexOf("failed", StringComparison.OrdinalIgnoreCase) >= 0
+            || message.IndexOf("error", StringComparison.OrdinalIgnoreCase) >= 0
+            || message.IndexOf("unavailable", StringComparison.OrdinalIgnoreCase) >= 0;
+        var previous = GUI.color;
+        GUI.color = failure
+            ? new Color(1f, 0.58f, 0.58f, 1f)
+            : new Color(0.62f, 1f, 0.68f, 1f);
+        GUILayout.Box((failure ? "Action refused: " : "Last action: ") + message, GUILayout.ExpandWidth(true));
+        GUI.color = previous;
     }
 
     private void SetVisible(bool value, string source)
