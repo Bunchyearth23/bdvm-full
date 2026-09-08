@@ -96,7 +96,10 @@ jobs:
           $stage = Join-Path $env:RUNNER_TEMP 'BDVM.Full'
           $release = Join-Path $env:GITHUB_WORKSPACE 'release'
           New-Item -ItemType Directory -Force -Path $stage, $release | Out-Null
-          Copy-Item dv-company/src/BDVM.Full/bin/Release/net48/*.dll $stage
+          $assemblies = @(Get-ChildItem dv-company/src/BDVM.Full/bin/Release/net48 -File -Filter 'BDVM.*.dll')
+          if ($assemblies.Count -ne 14) { throw "Expected exactly 14 BDVM assemblies, found $($assemblies.Count)." }
+          Copy-Item $assemblies.FullName $stage
+          if (Test-Path -LiteralPath (Join-Path $stage 'DVCompany.dll')) { throw 'Legacy DVCompany.dll must never enter a BDVM beta.' }
           Copy-Item dv-company/src/BDVM.Full/info.json, dv-company/src/BDVM.Full/module.json, dv-company/src/BDVM.Full/README.md, dv-company/src/BDVM.Full/LICENSE, dv-company/src/BDVM.Full/NOTICE, dv-company/src/BDVM.Full/COMPATIBILITY.md $stage
           $provenance = [ordered]@{
             schemaVersion = 1
