@@ -375,6 +375,8 @@ public static class Main
             try { status = "Exported observation: " + diagnostic!.ExportVisibilityObservation(); }
             catch (Exception exception) { status = "Observation failed: " + exception.Message; }
         }
+        if (GUILayout.Button("Run all safe in-game validation checks"))
+            RunAutomatedInGameValidation(entry);
         GUILayout.Label(status);
 
         var snapshot = runtimeStateProvider?.Current;
@@ -1656,6 +1658,94 @@ public static class Main
             entry.Logger.Log("[correlation=" + correlation + "] [event=license-economy-observation] rules=" + snapshot.Economy.LicenseEconomy.Rules.Count + ", records=" + snapshot.Economy.LicenseEconomy.Records.Count + ", hardGate=false");
             status = "License economy observation logged; no charge was applied.";
         }
+    }
+
+    private static void RunAutomatedInGameValidation(UnityModManager.ModEntry entry)
+    {
+        var correlation = "ingame-validation:" + Guid.NewGuid().ToString("N");
+        var lines = new List<string>();
+        var passed = 0;
+        var failed = 0;
+
+        void Check(string name, Action validation)
+        {
+            try
+            {
+                validation();
+                passed++;
+                lines.Add("PASS | " + name);
+            }
+            catch (Exception exception)
+            {
+                failed++;
+                lines.Add("FAIL | " + name + " | " + exception.GetType().Name + ": " + exception.Message);
+            }
+        }
+
+        var snapshot = runtimeStateProvider?.Current;
+        Check("career runtime is initialized", () =>
+        {
+            if (snapshot == null || string.IsNullOrWhiteSpace(runtimeStateProvider?.LocalPlayerId))
+                throw new InvalidOperationException("No initialized BDVM career is available.");
+        });
+
+        if (snapshot != null)
+        {
+            Check("authoritative economy role", () =>
+            {
+                if (!NetworkAuthorityPolicy.CanExecuteEconomy(runtimeRoleDetector!.Detect(), out var reason))
+                    throw new InvalidOperationException(reason);
+            });
+            Check("complete persistent state invariants", () => VehicleAcquisitionPersistence.Validate(snapshot));
+            Check("company economy invariants", () => CompanyEconomyPersistence.Validate(snapshot.Economy));
+            Check("finite market invariants", () => FiniteMarketValidation.Validate(snapshot.Market));
+            Check("dynamic economy invariants", () => DynamicEconomyValidation.Validate(snapshot.DynamicEconomy));
+            Check("initial delivery invariants", () => InitialDeliveryValidation.Validate(snapshot));
+            Check("inbound lease invariants", () => LeaseValidation.Validate(snapshot));
+            Check("outbound lease invariants", () => OutboundLeaseValidation.Validate(snapshot));
+            Check("mission assignment invariants", () => MissionAssignmentValidation.Validate(snapshot));
+            Check("industrial contract invariants", () => IndustrialEconomyValidation.Validate(snapshot));
+            Check("passenger economy invariants", () => PassengerEconomyValidation.Validate(snapshot));
+            Check("financing invariants", () => FinancingValidation.Validate(snapshot.Financing, snapshot));
+            Check("asset lifecycle invariants", () => AssetLifecycleValidation.Validate(snapshot.AssetLifecycle, snapshot));
+            Check("dedicated authority invariants", () => DedicatedAuthorityValidation.Validate(snapshot.DedicatedAuthority));
+            Check("triage assistance invariants", () => TriageAssistanceValidation.Validate(snapshot.TriageAssistance, snapshot));
+            Check("world population policy invariants", () => WorldPopulationPolicyEngine.Validate(runtimeSettings.WorldPopulationPolicy));
+            Check("save serialization round trip", () =>
+            {
+                var serialized = VehicleAcquisitionPersistence.Serialize(snapshot);
+                var restored = VehicleAcquisitionPersistence.Deserialize(serialized, snapshot.CheckpointId);
+                if (restored.CheckpointId != snapshot.CheckpointId)
+                    throw new InvalidOperationException("Round-trip checkpoint mismatch.");
+                if (restored.Economy.Wallets.Count != snapshot.Economy.Wallets.Count || restored.Fleet.Count != snapshot.Fleet.Count || restored.InitialDeliveries.Count != snapshot.InitialDeliveries.Count)
+                    throw new InvalidOperationException("Round-trip durable collection count mismatch.");
+            });
+            Check("local player and wallet linkage", () =>
+            {
+                var playerId = runtimeStateProvider!.LocalPlayerId!;
+                var player = snapshot.Economy.Players.Single(x => x.PlayerId == playerId);
+                if (!snapshot.Economy.Wallets.Any(x => x.Account.Kind == AccountKind.Player && x.Account.OwnerId == player.PlayerId))
+                    throw new InvalidOperationException("Local player wallet is missing.");
+            });
+            Check("authoritative diagnostic export", () => diagnostic!.ExportAuthoritative());
+        }
+
+        var reportDirectory = Path.Combine(entry.Path, "diagnostics");
+        Directory.CreateDirectory(reportDirectory);
+        var reportPath = Path.Combine(reportDirectory, "ingame-validation-" + DateTime.UtcNow.ToString("yyyyMMdd-HHmmss") + ".txt");
+        var header = new[]
+        {
+            "BDVM automated in-game validation",
+            "UTC: " + DateTime.UtcNow.ToString("O"),
+            "Correlation: " + correlation,
+            "Result: " + passed + " passed, " + failed + " failed",
+            ""
+        };
+        File.WriteAllLines(reportPath, header.Concat(lines));
+        status = failed == 0
+            ? "Automated validation passed: " + passed + "/" + passed + ". Report: " + reportPath
+            : "Automated validation failed: " + failed + " failed, " + passed + " passed. Report: " + reportPath;
+        entry.Logger.Log("[correlation=" + correlation + "] [event=ingame-validation] passed=" + passed + ", failed=" + failed + ", report=" + reportPath);
     }
 
     private static void RequireHostAuthority()
