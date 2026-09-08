@@ -47,6 +47,7 @@
     <Reference Include="DV.Inventory" Private="false" />
     <Reference Include="DV.Interaction" Private="false" />
     <Reference Include="DV.PointSet" Private="false" />
+    <Reference Include="DV.OriginShiftInfo" Private="false" />
     <Reference Include="DV.RailTrack" Private="false" />
     <Reference Include="DV.Common" Private="false" />
     <Reference Include="DV.UserManagement" Private="false" />

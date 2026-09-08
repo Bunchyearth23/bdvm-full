@@ -915,7 +915,7 @@ public static class Main
         catch (Exception exception) { status = "Market reconciliation refused: " + exception.Message; entry.Logger.Error("[correlation=" + correlation + "] [event=finite-market-reconcile-failed] " + exception); }
     }
 
-    private static void PlaceInitialDelivery(UnityModManager.ModEntry entry, InitialDeliveryGrant grant, InitialDeliveryTrackRule rule, double? aimedSpan = null)
+    private static void PlaceInitialDelivery(UnityModManager.ModEntry entry, InitialDeliveryGrant grant, InitialDeliveryTrackRule rule, double? aimedSpan = null, bool? withTrackDirection = null)
     {
         var correlation = Guid.NewGuid().ToString("N");
         try
@@ -924,7 +924,8 @@ public static class Main
             // The in-game radio supplies a validated one-shot track rule; configured rules remain
             // supported for the legacy/debug panel.
             var spans = aimedSpan.HasValue ? new Dictionary<string, double>(StringComparer.Ordinal) { [rule.TrackId] = aimedSpan.Value } : null;
-            var adapter = new UnityInitialDeliveryAdapter((runtimeSettings.InitialDeliveryTracks ?? new List<InitialDeliveryTrackRule>()).Concat(new[] { rule }), spans);
+            var directions = withTrackDirection.HasValue ? new Dictionary<string, bool>(StringComparer.Ordinal) { [rule.TrackId] = withTrackDirection.Value } : null;
+            var adapter = new UnityInitialDeliveryAdapter((runtimeSettings.InitialDeliveryTracks ?? new List<InitialDeliveryTrackRule>()).Concat(new[] { rule }), spans, directions);
             var result = runtimeStateProvider!.PlaceLocalInitialDelivery("initial-delivery:" + correlation, grant.GrantId, rule.TrackId, rule.Kind, runtimeRoleDetector!, adapter, new SaveGameInitialDeliveryCheckpointPort(entry));
             if (!SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance)) throw new InvalidOperationException("Initial delivery state could not be staged in SaveGameData.");
             status = "Initial delivery: " + result.State + " / " + result.ResultCode + ".";
@@ -936,12 +937,12 @@ public static class Main
     private static IReadOnlyList<InitialDeliveryGrant> PendingInitialDeliveries() => runtimeStateProvider?.Current?.InitialDeliveries
         ?.Where(x => x.State != InitialDeliveryState.Delivered).ToArray() ?? Array.Empty<InitialDeliveryGrant>();
 
-    private static string DeliverFromRadio(RailTrack track, double aimedSpan, InitialDeliveryTargetKind kind, InitialDeliveryGrant grant)
+    private static string DeliverFromRadio(RailTrack track, double aimedSpan, bool withTrackDirection, InitialDeliveryTargetKind kind, InitialDeliveryGrant grant)
     {
         if (mod == null) return "BDVM is not ready.";
         var trackId = track.LogicTrack()?.ID?.ToString();
         if (string.IsNullOrWhiteSpace(trackId)) return "Track identity is unavailable.";
-        PlaceInitialDelivery(mod, grant, new InitialDeliveryTrackRule { TrackId = trackId!, Kind = kind }, aimedSpan);
+        PlaceInitialDelivery(mod, grant, new InitialDeliveryTrackRule { TrackId = trackId!, Kind = kind }, aimedSpan, withTrackDirection);
         return status;
     }
 
