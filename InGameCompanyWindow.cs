@@ -9,7 +9,7 @@ public sealed class InGameCompanyWindow : MonoBehaviour
     private const int WindowId = 0x445643;
     private Action? drawContents;
     private Action<string>? log;
-    private Rect windowRect = new Rect(30f, 60f, 700f, 760f);
+    private Rect windowRect = new Rect(30f, 60f, 1100f, 760f);
     private Vector2 scroll;
     private bool visible;
     private bool worldInputBlocked;
@@ -38,7 +38,7 @@ public sealed class InGameCompanyWindow : MonoBehaviour
             return;
         }
 
-        windowRect.width = Math.Min(700f, Math.Max(420f, Screen.width - 40f));
+        windowRect.width = Math.Min(Screen.width - 40f, Math.Max(760f, Screen.width * 0.82f));
         windowRect.height = Math.Min(760f, Math.Max(320f, Screen.height - 80f));
         windowRect.x = Mathf.Clamp(windowRect.x, 0f, Math.Max(0f, Screen.width - windowRect.width));
         windowRect.y = Mathf.Clamp(windowRect.y, 0f, Math.Max(0f, Screen.height - windowRect.height));
@@ -48,8 +48,8 @@ public sealed class InGameCompanyWindow : MonoBehaviour
     private void DrawWindow(int id)
     {
         GUILayout.BeginHorizontal();
-        GUILayout.Label("Interface économique — visible uniquement en mouse mode");
-        if (GUILayout.Button("Fermer", GUILayout.Width(90f))) SetVisible(false, "close-button");
+        GUILayout.Label("Economic interface — visible only in mouse mode");
+        if (GUILayout.Button("Close", GUILayout.Width(90f))) SetVisible(false, "close-button");
         GUILayout.EndHorizontal();
         scroll = GUILayout.BeginScrollView(scroll);
         try { drawContents?.Invoke(); }
