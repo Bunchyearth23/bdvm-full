@@ -28,6 +28,8 @@ internal sealed class BDVMStarterDeliveryRadio : MonoBehaviour, ICommsRadioMode
     private bool placementLocked;
     private bool withTrackDirection = true;
     private bool canSpawn;
+    private RailTrack[] eligibleTracks = Array.Empty<RailTrack>();
+    private float nextTargetUpdate;
 
     public ButtonBehaviourType ButtonBehaviour { get; private set; } = ButtonBehaviourType.Override;
     public Color GetLaserBeamColor() => new Color(0.15f, 0.8f, 1f);
@@ -56,11 +58,29 @@ internal sealed class BDVMStarterDeliveryRadio : MonoBehaviour, ICommsRadioMode
         highlighter.TurnOff();
     }
 
-    public void Enable() { selectedIndex = 0; placementLocked = false; withTrackDirection = true; UpdateSelectedBounds(); Refresh(); }
-    public void Disable() { pointedTrack = null; placementLocked = false; canSpawn = false; highlighter?.TurnOff(); lcdArrow?.TurnOff(); }
+    public void Enable()
+    {
+        selectedIndex = 0;
+        placementLocked = false;
+        withTrackDirection = true;
+        eligibleTracks = (RailTrackRegistry.Instance?.AllTracks ?? Enumerable.Empty<RailTrack>()).Where(IsEligible).ToArray();
+        nextTargetUpdate = 0f;
+        UpdateSelectedBounds();
+        Refresh();
+        Debug.Log($"[BDVM.Full] [correlation=starter-delivery-radio] [event=mode-enabled] eligibleTracks={eligibleTracks.Length}");
+    }
+    public void Disable() { pointedTrack = null; placementLocked = false; canSpawn = false; eligibleTracks = Array.Empty<RailTrack>(); highlighter?.TurnOff(); lcdArrow?.TurnOff(); }
     private void OnDestroy() { highlighter?.Destroy(); highlighter = null; }
     public void SetStartingDisplay() => Refresh();
-    public void OnUpdate() { UpdateTarget(); Refresh(); }
+    public void OnUpdate()
+    {
+        // Projecting onto every rail spline every frame can stall the radio controller.
+        // The target only needs interactive, not render-frame, refresh frequency.
+        if (Time.unscaledTime < nextTargetUpdate) return;
+        nextTargetUpdate = Time.unscaledTime + 0.1f;
+        UpdateTarget();
+        Refresh();
+    }
 
     public void OnUse()
     {
@@ -105,7 +125,7 @@ internal sealed class BDVMStarterDeliveryRadio : MonoBehaviour, ICommsRadioMode
         canSpawn = false;
         pointedTrack = null;
         if (signalOrigin == null || !Physics.Raycast(signalOrigin.position, signalOrigin.forward, out var hit, SignalRange, LayerMask.GetMask("Default"))) { ShowInvalidPreview(); return; }
-        var match = RailTrackRegistry.Instance?.AllTracks.Select(track => new { Track = track, Point = RailTrack.GetPointWithinRangeWithYOffset(track, hit.point, 3f, -1.75f) })
+        var match = eligibleTracks.Select(track => new { Track = track, Point = RailTrack.GetPointWithinRangeWithYOffset(track, hit.point, 3f, -1.75f) })
             .Where(x => x.Point.HasValue).OrderBy(x => ((Vector3)x.Point!.Value.position - hit.point).sqrMagnitude).FirstOrDefault();
         if (match == null) { ShowInvalidPreview(); return; }
         pointedTrack = match.Track;
