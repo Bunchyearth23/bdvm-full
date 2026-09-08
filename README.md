@@ -7,7 +7,7 @@
 | Property | Value |
 | --- | --- |
 | Module kind | Integration bundle |
-| Manifest version | 2.1.0 |
+| Manifest version | 2.2.0 |
 | Target framework | .NET Framework 4.8 (`net48`) |
 | Mod loader | Unity Mod Manager 0.27.3 or compatible |
 | Current declared requirements | `Multiplayer`, `SelfShunt`, `PassengerJobs`, `RemoteDispatchLive` |

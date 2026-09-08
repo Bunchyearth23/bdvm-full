@@ -1,6 +1,6 @@
 {
   "Id": "BDVM.Full",
-  "Version": "2.1.0",
+  "Version": "2.2.0",
   "DisplayName": "BDVM - Full",
   "Author": "Arnaud",
   "EntryMethod": "BDVM.Main.Load",
