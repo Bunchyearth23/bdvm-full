@@ -97,4 +97,4 @@ Strict population control is disabled by default. It requires the SaveGameData h
 
 ## License
 
-BDVM code is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE). Incorporated or separately distributed upstream work remains subject to its own license or recorded permission.
+BDVM code is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) and the applied copyright [NOTICE](NOTICE). Incorporated or separately distributed upstream work remains subject to its own license or recorded permission.
