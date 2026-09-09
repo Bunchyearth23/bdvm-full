@@ -30,6 +30,8 @@ internal sealed class BDVMStarterDeliveryRadio : MonoBehaviour, ICommsRadioMode
     private bool canSpawn;
     private RailTrack[] eligibleTracks = Array.Empty<RailTrack>();
     private float nextTargetUpdate;
+    private float nextTrackUpdate;
+    private bool faulted;
 
     public ButtonBehaviourType ButtonBehaviour { get; private set; } = ButtonBehaviourType.Regular;
     public Color GetLaserBeamColor() => new Color(0.15f, 0.8f, 1f);
@@ -41,10 +43,14 @@ internal sealed class BDVMStarterDeliveryRadio : MonoBehaviour, ICommsRadioMode
         deliver = delivery ?? throw new ArgumentNullException(nameof(delivery));
     }
 
-    internal void Initialize(CommsRadioController controller)
+    internal bool Initialize(CommsRadioController controller)
     {
         var template = controller.GetComponent<CommsRadioCarSpawner>();
-        if (template == null) return;
+        if (template == null)
+        {
+            Debug.LogError("[BDVM.Full] [correlation=starter-delivery-radio] [event=initialize-refused] nativeSpawnerMissing=true");
+            return false;
+        }
         display = template.display;
         signalOrigin = template.signalOrigin;
         validMaterial = template.validMaterial;
@@ -56,31 +62,43 @@ internal sealed class BDVMStarterDeliveryRadio : MonoBehaviour, ICommsRadioMode
         arrows.name = "BDVM Delivery Direction Highlighter";
         highlighter = new CarDestinationHighlighter(destination, arrows);
         highlighter.TurnOff();
+        return display != null && signalOrigin != null;
     }
 
     public void Enable()
     {
-        selectedIndex = 0;
-        placementLocked = false;
-        withTrackDirection = true;
-        ButtonBehaviour = ButtonBehaviourType.Regular;
-        eligibleTracks = (RailTrackRegistry.Instance?.AllTracks ?? Enumerable.Empty<RailTrack>()).Where(IsEligible).ToArray();
+        ResetInteraction();
+        faulted = false;
+        eligibleTracks = Array.Empty<RailTrack>();
         nextTargetUpdate = 0f;
-        UpdateSelectedBounds();
-        Refresh();
-        Debug.Log($"[BDVM.Full] [correlation=starter-delivery-radio] [event=mode-enabled] eligibleTracks={eligibleTracks.Length}");
+        nextTrackUpdate = 0f;
+        Guard("enable", () =>
+        {
+            UpdateSelectedBounds();
+            Refresh();
+            Debug.Log("[BDVM.Full] [correlation=starter-delivery-radio] [event=mode-enabled] deferredTrackDiscovery=true");
+        });
     }
-    public void Disable() { pointedTrack = null; placementLocked = false; canSpawn = false; ButtonBehaviour = ButtonBehaviourType.Regular; eligibleTracks = Array.Empty<RailTrack>(); highlighter?.TurnOff(); lcdArrow?.TurnOff(); }
+    public void Disable() { ResetInteraction(); eligibleTracks = Array.Empty<RailTrack>(); highlighter?.TurnOff(); lcdArrow?.TurnOff(); }
     private void OnDestroy() { highlighter?.Destroy(); highlighter = null; }
     public void SetStartingDisplay() => Refresh();
     public void OnUpdate()
     {
+        if (faulted) return;
         // Projecting onto every rail spline every frame can stall the radio controller.
         // The target only needs interactive, not render-frame, refresh frequency.
         if (Time.unscaledTime < nextTargetUpdate) return;
         nextTargetUpdate = Time.unscaledTime + 0.1f;
-        UpdateTarget();
-        Refresh();
+        Guard("update", () =>
+        {
+            if (Time.unscaledTime >= nextTrackUpdate)
+            {
+                nextTrackUpdate = Time.unscaledTime + 2.5f;
+                RefreshEligibleTracks();
+            }
+            UpdateTarget();
+            Refresh();
+        });
     }
 
     public void OnUse()
@@ -90,7 +108,13 @@ internal sealed class BDVMStarterDeliveryRadio : MonoBehaviour, ICommsRadioMode
         if (!canSpawn || pointedTrack == null) { Refresh("No safe depot/service placement here."); return; }
         if (!placementLocked) { placementLocked = true; ButtonBehaviour = ButtonBehaviourType.Override; Refresh("A/B reverses direction; Use delivers."); return; }
         if (selectedIndex >= grants.Count) selectedIndex = 0;
-        var result = deliver(pointedTrack, pointedSpan, withTrackDirection, pointedKind, grants[selectedIndex]);
+        string result;
+        try { result = deliver(pointedTrack, pointedSpan, withTrackDirection, pointedKind, grants[selectedIndex]); }
+        catch (Exception ex)
+        {
+            Debug.LogError($"[BDVM.Full] [correlation=starter-delivery-radio] [event=delivery-failed] {ex}");
+            result = "Delivery failed; see Player.log.";
+        }
         placementLocked = false;
         withTrackDirection = true;
         ButtonBehaviour = ButtonBehaviourType.Regular;
@@ -126,7 +150,7 @@ internal sealed class BDVMStarterDeliveryRadio : MonoBehaviour, ICommsRadioMode
         var valid = points == null ? null : CarSpawner.FindClosestValidPointForCarStartingFromIndex(points, match.Point!.Value.index, selectedBounds.extents);
         var point = valid ?? match.Point;
         pointedSpan = point!.Value.span;
-        canSpawn = valid.HasValue && IsEligible(pointedTrack);
+        canSpawn = valid.HasValue;
         var forward = withTrackDirection ? point.Value.forward : -point.Value.forward;
         highlighter?.Highlight((Vector3)point.Value.position + OriginShift.currentMove, forward, selectedBounds, canSpawn ? validMaterial : invalidMaterial);
         if (canSpawn && placementLocked) UpdateDirectionArrow(forward); else lcdArrow?.TurnOff();
@@ -157,19 +181,62 @@ internal sealed class BDVMStarterDeliveryRadio : MonoBehaviour, ICommsRadioMode
         display.SetDisplay("BDVM DELIVERY", result ?? prompt, canSpawn ? "confirm" : "cancel");
     }
 
-    private static IReadOnlyList<InitialDeliveryGrant> Available() => pending().Where(x => x.State == InitialDeliveryState.Available).OrderBy(x => x.GrantId, StringComparer.Ordinal).ToArray();
+    private static IReadOnlyList<InitialDeliveryGrant> Available()
+    {
+        try { return (pending() ?? Array.Empty<InitialDeliveryGrant>()).Where(x => x != null && x.State == InitialDeliveryState.Available).OrderBy(x => x.GrantId, StringComparer.Ordinal).ToArray(); }
+        catch (Exception ex)
+        {
+            Debug.LogError($"[BDVM.Full] [correlation=starter-delivery-radio] [event=pending-query-failed] {ex}");
+            return Array.Empty<InitialDeliveryGrant>();
+        }
+    }
 
-    private static bool IsEligible(RailTrack? track)
+    private void RefreshEligibleTracks()
+    {
+        var activeYards = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var station in StationController.allStations ?? Enumerable.Empty<StationController>())
+        {
+            var range = station != null ? station.GetComponent<StationJobGenerationRange>() : null;
+            var yardId = station?.stationInfo?.YardID;
+            if (range != null && !string.IsNullOrWhiteSpace(yardId) && range.IsPlayerInJobGenerationZone(range.PlayerSqrDistanceFromStationCenter))
+                activeYards.Add(yardId!);
+        }
+
+        if (activeYards.Count == 0) { eligibleTracks = Array.Empty<RailTrack>(); return; }
+        eligibleTracks = (RailTrackRegistry.Instance?.AllTracks ?? Enumerable.Empty<RailTrack>())
+            .Where(track => IsEligible(track, activeYards)).ToArray();
+    }
+
+    private void ResetInteraction()
+    {
+        selectedIndex = 0;
+        pointedTrack = null;
+        placementLocked = false;
+        withTrackDirection = true;
+        canSpawn = false;
+        ButtonBehaviour = ButtonBehaviourType.Regular;
+    }
+
+    private void Guard(string operation, Action action)
+    {
+        try { action(); }
+        catch (Exception ex)
+        {
+            faulted = true;
+            ResetInteraction();
+            highlighter?.TurnOff();
+            lcdArrow?.TurnOff();
+            display?.SetDisplay("BDVM DELIVERY", "Mode unavailable; see Player.log.", "");
+            Debug.LogError($"[BDVM.Full] [correlation=starter-delivery-radio] [event={operation}-failed] {ex}");
+        }
+    }
+
+    private static bool IsEligible(RailTrack? track, ISet<string> activeYards)
     {
         if (track?.LogicTrack()?.ID == null) return false;
         var id = track.LogicTrack().ID.FullDisplayID ?? "";
         if (id.StartsWith("#", StringComparison.Ordinal)) return false;
-        return StationController.allStations.Any(station =>
-        {
-            var range = station != null ? station.GetComponent<StationJobGenerationRange>() : null;
-            var yardId = station?.stationInfo?.YardID;
-            return range != null && !string.IsNullOrWhiteSpace(yardId) && id.StartsWith(yardId + "-", StringComparison.OrdinalIgnoreCase) && range.IsPlayerInJobGenerationZone(range.PlayerSqrDistanceFromStationCenter);
-        });
+        return activeYards.Any(yardId => id.StartsWith(yardId + "-", StringComparison.OrdinalIgnoreCase));
     }
 
     private static InitialDeliveryTargetKind Classify(RailTrack? track)
@@ -184,8 +251,15 @@ internal static class BDVMStarterDeliveryRadioPatch
 {
     private static void Postfix(CommsRadioController __instance, List<ICommsRadioMode> ___allModes)
     {
-        var mode = __instance.gameObject.GetComponent<BDVMStarterDeliveryRadio>() ?? __instance.gameObject.AddComponent<BDVMStarterDeliveryRadio>();
-        mode.Initialize(__instance);
-        if (!___allModes.Contains(mode)) ___allModes.Add(mode);
+        try
+        {
+            var mode = __instance.gameObject.GetComponent<BDVMStarterDeliveryRadio>() ?? __instance.gameObject.AddComponent<BDVMStarterDeliveryRadio>();
+            if (mode.Initialize(__instance) && !___allModes.Contains(mode)) ___allModes.Add(mode);
+        }
+        catch (Exception ex)
+        {
+            // Never let an optional BDVM mode break the vanilla radio's Awake lifecycle.
+            Debug.LogError($"[BDVM.Full] [correlation=starter-delivery-radio] [event=registration-failed] {ex}");
+        }
     }
 }
