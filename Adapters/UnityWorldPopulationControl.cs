@@ -193,6 +193,26 @@ internal static class BDVMVanillaJobPopulationPatch
     private static bool Prefix() => UnityWorldPopulationControl.ShouldGenerateVanillaJobs("vanilla:StationProceduralJobsController.TryToGenerateJobs");
 }
 
+// TryToGenerateJobs starts a coroutine. Guard its MoveNext as well so a coroutine
+// queued immediately before strict activation cannot create a job/consist after
+// the generator inventory has been frozen.
+[HarmonyPatch]
+internal static class BDVMVanillaJobCoroutinePopulationPatch
+{
+    private static MethodBase? TargetMethod()
+    {
+        var iterator = typeof(StationProceduralJobsController)
+            .GetNestedTypes(BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+            .FirstOrDefault(type => type.Name.IndexOf("GenerateProceduralJobsCoro", StringComparison.Ordinal) >= 0);
+        return iterator == null ? null : AccessTools.Method(iterator, "MoveNext");
+    }
+
+    private static bool Prepare() => TargetMethod() != null;
+
+    [HarmonyPrefix, HarmonyPriority(Priority.First)]
+    private static bool Prefix() => UnityWorldPopulationControl.ShouldGenerateVanillaJobs("vanilla:StationProceduralJobsController.GenerateProceduralJobsCoro.MoveNext");
+}
+
 [HarmonyPatch(typeof(SpawnCarsTutorial), nameof(SpawnCarsTutorial.SpawnTutorialCars))]
 internal static class BDVMTutorialPopulationPatch
 {
