@@ -45,7 +45,8 @@ public static class UnityWorldPopulationControl
     public static void ObserveNewCareer(bool skipTutorial)
     {
         if (!configured) return;
-        if (!skipTutorial) { Refuse("strict-population-tutorial-refused"); return; }
+        var decision = WorldPopulationCareerPolicy.Evaluate(new WorldPopulationCareerRequest { Kind = WorldPopulationCareerKind.NewCareer, TutorialEnabled = !skipTutorial });
+        if (!decision.AllowActivation) { Refuse(decision.ResultCode); return; }
         eligibleCareerObserved = true;
         Activate("new-career-non-tutorial");
     }
@@ -54,7 +55,8 @@ public static class UnityWorldPopulationControl
     {
         if (!configured) return;
         var hasBdvmCheckpoint = data?.GetJObject("BDVM")?["SaveGameIntegration"]?.Type == Newtonsoft.Json.Linq.JTokenType.String;
-        if (!hasBdvmCheckpoint) { Refuse("strict-population-existing-save-without-bdvm-checkpoint"); return; }
+        var decision = WorldPopulationCareerPolicy.Evaluate(new WorldPopulationCareerRequest { Kind = WorldPopulationCareerKind.ExistingSave, HasBdvmCheckpoint = hasBdvmCheckpoint });
+        if (!decision.AllowActivation) { Refuse(decision.ResultCode); return; }
         eligibleCareerObserved = true;
         Activate("existing-bdvm-career");
     }
