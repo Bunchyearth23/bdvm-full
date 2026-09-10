@@ -25,6 +25,7 @@ internal sealed class BDVMStarterDeliveryRadio : MonoBehaviour, ICommsRadioMode
     private InitialDeliveryTargetKind pointedKind;
     private Bounds selectedBounds;
     private int selectedIndex;
+    private bool grantSelectionActive;
     private bool placementLocked;
     private bool withTrackDirection = true;
     private bool canSpawn;
@@ -43,9 +44,8 @@ internal sealed class BDVMStarterDeliveryRadio : MonoBehaviour, ICommsRadioMode
         deliver = delivery ?? throw new ArgumentNullException(nameof(delivery));
     }
 
-    internal bool Initialize(CommsRadioController controller)
+    internal bool Initialize(CommsRadioController controller, CommsRadioCarSpawner? template)
     {
-        var template = controller.GetComponent<CommsRadioCarSpawner>();
         if (template == null)
         {
             Debug.LogError("[BDVM.Full] [correlation=starter-delivery-radio] [event=initialize-refused] nativeSpawnerMissing=true");
@@ -76,7 +76,7 @@ internal sealed class BDVMStarterDeliveryRadio : MonoBehaviour, ICommsRadioMode
         {
             UpdateSelectedBounds();
             Refresh();
-            Debug.Log("[BDVM.Full] [correlation=starter-delivery-radio] [event=mode-enabled] deferredTrackDiscovery=true");
+            Debug.Log($"[BDVM.Full] [correlation=starter-delivery-radio] [event=mode-enabled] deferredTrackDiscovery=true, selectionActive={grantSelectionActive}, grants={Available().Count}");
         });
     }
     public void Disable() { ResetInteraction(); eligibleTracks = Array.Empty<RailTrack>(); highlighter?.TurnOff(); lcdArrow?.TurnOff(); }
@@ -105,8 +105,28 @@ internal sealed class BDVMStarterDeliveryRadio : MonoBehaviour, ICommsRadioMode
     {
         var grants = Available();
         if (grants.Count == 0) { Refresh("No delivery pending."); return; }
-        if (!canSpawn || pointedTrack == null) { Refresh("No safe depot/service placement here."); return; }
-        if (!placementLocked) { placementLocked = true; ButtonBehaviour = ButtonBehaviourType.Override; Refresh("A/B reverses direction; Use delivers."); return; }
+        if (!grantSelectionActive && !placementLocked)
+        {
+            grantSelectionActive = true;
+            ButtonBehaviour = ButtonBehaviourType.Override;
+            Debug.Log($"[BDVM.Full] [correlation=starter-delivery-radio] [event=selection-entered] grants={grants.Count}, selectedIndex={selectedIndex}");
+            Refresh();
+            return;
+        }
+        if (grantSelectionActive)
+        {
+            grantSelectionActive = false;
+            placementLocked = true;
+            Debug.Log($"[BDVM.Full] [correlation=starter-delivery-radio] [event=placement-entered] selectedIndex={selectedIndex}, grant={grants[selectedIndex].GrantId}");
+            Refresh("Point at a safe track; A/B reverses; Use delivers.");
+            return;
+        }
+        if (!canSpawn || pointedTrack == null)
+        {
+            ResetInteraction();
+            Refresh("Placement cancelled: no safe depot/service track here.");
+            return;
+        }
         if (selectedIndex >= grants.Count) selectedIndex = 0;
         string result;
         try { result = deliver(pointedTrack, pointedSpan, withTrackDirection, pointedKind, grants[selectedIndex]); }
@@ -115,16 +135,26 @@ internal sealed class BDVMStarterDeliveryRadio : MonoBehaviour, ICommsRadioMode
             Debug.LogError($"[BDVM.Full] [correlation=starter-delivery-radio] [event=delivery-failed] {ex}");
             result = "Delivery failed; see Player.log.";
         }
-        placementLocked = false;
-        withTrackDirection = true;
-        ButtonBehaviour = ButtonBehaviourType.Regular;
+        ResetInteraction();
         UpdateSelectedBounds();
         Refresh(result);
     }
 
-    public bool ButtonACustomAction() => placementLocked && Reverse();
-    public bool ButtonBCustomAction() => placementLocked && Reverse();
+    public bool ButtonACustomAction() => placementLocked ? Reverse() : grantSelectionActive && SelectGrant(-1);
+    public bool ButtonBCustomAction() => placementLocked ? Reverse() : grantSelectionActive && SelectGrant(1);
     private bool Reverse() { if (!canSpawn) return false; withTrackDirection = !withTrackDirection; Refresh(); return true; }
+
+    private bool SelectGrant(int offset)
+    {
+        var grants = Available();
+        if (grants.Count < 2) return false;
+        selectedIndex = (selectedIndex + offset + grants.Count) % grants.Count;
+        UpdateSelectedBounds();
+        UpdateTarget();
+        Debug.Log($"[BDVM.Full] [correlation=starter-delivery-radio] [event=grant-selected] selectedIndex={selectedIndex}, grant={grants[selectedIndex].GrantId}, definition={grants[selectedIndex].DefinitionIds[0]}");
+        Refresh();
+        return true;
+    }
 
     private void UpdateSelectedBounds()
     {
@@ -173,12 +203,27 @@ internal sealed class BDVMStarterDeliveryRadio : MonoBehaviour, ICommsRadioMode
     {
         if (display == null) return;
         var grants = Available();
-        if (grants.Count == 0) { display.SetDisplay("BDVM DELIVERY", result ?? "No owned stock is awaiting delivery.", ""); return; }
+        if (grants.Count == 0)
+        {
+            grantSelectionActive = false;
+            placementLocked = false;
+            ButtonBehaviour = ButtonBehaviourType.Regular;
+            display.SetDisplay("BDVM DELIVERY", result ?? "No owned stock is awaiting delivery.", "");
+            return;
+        }
         if (selectedIndex >= grants.Count) selectedIndex = 0;
         var grant = grants[selectedIndex];
         var direction = withTrackDirection ? "track direction" : "reverse direction";
-        var prompt = placementLocked ? $"{grant.DefinitionIds[0]}\n{direction}\nA/B reverse; Use confirms" : $"Next: {grant.DefinitionIds[0]}\nUse chooses placement";
-        display.SetDisplay("BDVM DELIVERY", result ?? prompt, canSpawn ? "confirm" : "cancel");
+        if (!grantSelectionActive && !placementLocked)
+        {
+            display.SetDisplay("BDVM DELIVERY", result ?? $"Owned stock awaits delivery.\nNext: {grant.DefinitionIds[0]}", "START");
+            return;
+        }
+        var prompt = placementLocked
+            ? $"{grant.DefinitionIds[0]}\n{direction}\nA/B reverse; Use confirms"
+            : $"Selected: {grant.DefinitionIds[0]}\nA/B select; Use chooses placement";
+        var action = placementLocked ? (canSpawn ? "CONFIRM" : "CANCEL") : "PLACE";
+        display.SetDisplay("BDVM DELIVERY", result ?? prompt, action);
     }
 
     private static IReadOnlyList<InitialDeliveryGrant> Available()
@@ -211,6 +256,7 @@ internal sealed class BDVMStarterDeliveryRadio : MonoBehaviour, ICommsRadioMode
     {
         selectedIndex = 0;
         pointedTrack = null;
+        grantSelectionActive = false;
         placementLocked = false;
         withTrackDirection = true;
         canSpawn = false;
@@ -253,8 +299,9 @@ internal static class BDVMStarterDeliveryRadioPatch
     {
         try
         {
+            var template = ___allModes.OfType<CommsRadioCarSpawner>().FirstOrDefault();
             var mode = __instance.gameObject.GetComponent<BDVMStarterDeliveryRadio>() ?? __instance.gameObject.AddComponent<BDVMStarterDeliveryRadio>();
-            if (mode.Initialize(__instance) && !___allModes.Contains(mode)) ___allModes.Add(mode);
+            if (mode.Initialize(__instance, template) && !___allModes.Contains(mode)) ___allModes.Add(mode);
         }
         catch (Exception ex)
         {

@@ -16,8 +16,10 @@ internal sealed class UnityInitialDeliveryAdapter : IInitialDeliveryPort
     private readonly Dictionary<string, InitialDeliveryTargetKind> allowedTracks;
     private readonly IReadOnlyDictionary<string, double> requestedStartSpans;
     private readonly IReadOnlyDictionary<string, bool> requestedDirections;
+    private readonly VehicleAcquisitionSnapshot? snapshot;
 
-    public UnityInitialDeliveryAdapter(IEnumerable<InitialDeliveryTrackRule> rules, IReadOnlyDictionary<string, double>? requestedStartSpans = null, IReadOnlyDictionary<string, bool>? requestedDirections = null)
+    public UnityInitialDeliveryAdapter(IEnumerable<InitialDeliveryTrackRule> rules, IReadOnlyDictionary<string, double>? requestedStartSpans = null,
+        IReadOnlyDictionary<string, bool>? requestedDirections = null, VehicleAcquisitionSnapshot? snapshot = null)
     {
         allowedTracks = (rules ?? Array.Empty<InitialDeliveryTrackRule>())
             .Where(x => x != null && !string.IsNullOrWhiteSpace(x.TrackId))
@@ -25,6 +27,7 @@ internal sealed class UnityInitialDeliveryAdapter : IInitialDeliveryPort
             .ToDictionary(x => x.Key, x => x.Single().Kind, StringComparer.Ordinal);
         this.requestedStartSpans = requestedStartSpans ?? new Dictionary<string, double>(StringComparer.Ordinal);
         this.requestedDirections = requestedDirections ?? new Dictionary<string, bool>(StringComparer.Ordinal);
+        this.snapshot = snapshot;
     }
 
     public InitialDeliveryPortResult Preflight(string operationId, string trackId, InitialDeliveryTargetKind targetKind, IReadOnlyList<string> definitionIds)
@@ -83,9 +86,27 @@ internal sealed class UnityInitialDeliveryAdapter : IInitialDeliveryPort
     {
         lock (Gate)
         {
-            if (!Completed.TryGetValue(operationId, out var known)) return Unknown("delivery-operation-not-observed-in-this-runtime");
-            return InspectKnown(known);
+            if (Completed.TryGetValue(operationId, out var known)) return InspectKnown(known);
+            var persisted = PersistedCarGuids(operationId, trackId, targetKind, definitionIds);
+            return persisted == null ? Unknown("delivery-operation-not-observed-in-runtime-or-persisted-state") : InspectKnown(persisted);
         }
+    }
+
+    private string[]? PersistedCarGuids(string operationId, string trackId, InitialDeliveryTargetKind targetKind, IReadOnlyList<string> definitionIds)
+    {
+        if (snapshot == null || string.IsNullOrWhiteSpace(operationId)) return null;
+        var grant = snapshot.InitialDeliveries.SingleOrDefault(value =>
+            !string.IsNullOrWhiteSpace(value.PlacementCommandId) && string.Equals(value.PlacementCommandId + ":spawn", operationId, StringComparison.Ordinal));
+        if (grant == null || !string.Equals(grant.TargetTrackId, trackId, StringComparison.Ordinal) || grant.TargetKind != targetKind ||
+            !grant.DefinitionIds.SequenceEqual(definitionIds ?? Array.Empty<string>(), StringComparer.Ordinal)) return null;
+        var guids = new List<string>();
+        foreach (var assetId in grant.AssetIds)
+        {
+            var asset = snapshot.Assets.Assets.SingleOrDefault(value => string.Equals(value.AssetId, assetId, StringComparison.Ordinal));
+            if (asset == null || asset.GameLink.State != PersistentLinkState.Resolved || !Guid.TryParse(asset.GameLink.Value, out var parsed) || parsed == Guid.Empty) return null;
+            guids.Add(parsed.ToString("D"));
+        }
+        return guids.Count == grant.AssetIds.Count && guids.Distinct(StringComparer.OrdinalIgnoreCase).Count() == guids.Count ? guids.ToArray() : null;
     }
 
     private static InitialDeliveryPortResult InspectKnown(IReadOnlyList<string> guids)

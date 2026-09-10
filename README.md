@@ -13,7 +13,7 @@ modular Derail Valley project.
 | Manifest version | 0.3.0 |
 | Target framework | .NET Framework 4.8 (`net48`) |
 | Mod loader | Unity Mod Manager 0.27.3 or compatible |
-| Current declared requirements | `Multiplayer`, `SelfShunt`, `PassengerJobs`, `RemoteDispatchLive` |
+| Current declared requirements | BDVM `Multiplayer` fork with `MultiplayerAPI` 1.4.0+, `SelfShunt`, `PassengerJobs`, `RemoteDispatchLive` |
 | Release state | Beta development candidate; the first stable release will be 1.0.0 |
 
 ## Included modules
@@ -30,12 +30,15 @@ Starter rolling stock is delivered with the native comms radio. Select **BDVM DE
 
 The beta validation interface can create one end-to-end starter freight job after the three delivered flatcars are placed together on a compatible warehouse track. It selects a real cargo and destination warehouse, uses the owned CarGUIDs in a persistent SelfShunt job chain, and relies on the game's normal booklet, loading machine, unloading machine and payment flow. It never creates replacement wagons.
 
+The industrial interface also discovers a real loaded origin/destination warehouse pair for selected available freight wagons controlled by the player or company. It configures persistent stock, a bounded production recipe and a shortage-driven transport policy, then publishes a reservable need. After acceptance and wagon assignment, BDVM creates a zero-wage SelfShunt job using exactly those physical wagons. Loading and unloading are reconciled per wagon; BDVM alone pays the frozen contract reward. Correlations survive save/reload, cancellation requires authoritative external abandonment, and production resumes without creating rolling stock.
+
 - Initialize host-authoritative player, company and wallet state from the loaded career.
 - Persist BDVM checkpoints through the Derail Valley save hook.
 - Manage company creation, membership, funds and economic diagnostics.
 - Exercise audited acquisition and resale flows through Unity vehicle adapters.
 - Protect economically owned assets from unsafe cleanup.
 - Compose finite-market, licensing, financing, industrial, mission and passenger domain services.
+- Publish station transport needs and expose host-computed personal/company wagon choices to the in-game and Management interfaces.
 - Validate that a compatible Passenger Jobs runtime is present before accepting a passenger mission ID.
 - Register Dispatch and Management web modules.
 - Adapt the current browser transport through the BDVM Remote Dispatch fork.
@@ -51,12 +54,12 @@ The beta validation interface can create one end-to-end starter freight job afte
 - The current `info.json` requires Multiplayer, SelfShunt, Passenger Jobs and Remote Dispatch Live because their bridges are included. The architecture permits omitting bridges later, but this bundle does not yet package that choice.
 - The web platform does not grant business authority to browser code; routes expose read models and authenticated intents only.
 - No AI train drivers are included. Maintenance remains player-organized and manual.
-- No compatibility facade or automatic import of old `DVCompany` checkpoints is shipped.
+- No compatibility facade or automatic import of unsupported prototype checkpoints is shipped.
 - Do not assume an arbitrary build is save-compatible; use test saves until a release explicitly guarantees migration.
 
 ## Source dependencies
 
-All 14 `BDVM.*` repositories must be siblings under `src/`. Building requires a Derail Valley installation for Unity, game and Unity Mod Manager assemblies. It also requires compatible `MultiplayerAPI.dll`, `SelfShunt.API.dll` and `PassengerJobs.API.dll` assemblies at the paths expected by the project. `PassengerJobs`, `RemoteDispatchLive`, `Multiplayer` and `SelfShunt` are runtime dependencies of the complete profile; PassengerJobs itself requires `DVLangHelper`.
+All 14 `BDVM.*` repositories must be siblings under `src/`. Building requires a Derail Valley installation for Unity, game and Unity Mod Manager assemblies. It also requires `MultiplayerAPI.dll` 1.4.0 or later plus compatible `SelfShunt.API.dll` and `PassengerJobs.API.dll` assemblies at the paths expected by the project. `PassengerJobs`, `RemoteDispatchLive`, the BDVM Multiplayer fork and `SelfShunt` are runtime dependencies of the complete profile; PassengerJobs itself requires `DVLangHelper`. Multiplayer API 1.4 supplies the authenticated, durable, initialized-once individual wallets used by remote economic actions; an earlier API is not a compatible complete-profile runtime.
 
 ## Build
 
@@ -80,7 +83,7 @@ The integration workspace provides:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\tools\Test-W039BdvmMigration.ps1
-dotnet run --project .\tests\DVCompany.DomainTests\DVCompany.DomainTests.csproj -c Release
+dotnet run --project .\tests\BDVM.Domain.Tests\BDVM.Domain.Tests.csproj -c Release
 ```
 
 Validate against a disposable save until persistence compatibility is formally released. Tests should cover solo host startup, save/reload, UI input blocking, company money, asset acquisition/resale, generator suppression and multiplayer host/client refusal paths.

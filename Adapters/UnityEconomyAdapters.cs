@@ -108,6 +108,59 @@ public sealed class UnityAssetReleaseGuard : IAssetBundleReleaseGuard
     }
 }
 
+public sealed class UnityLeaseReturnGuard : IAssetBundleReleaseGuard
+{
+    private readonly UnityAssetReleaseGuard baseGuard = new UnityAssetReleaseGuard();
+    private readonly HashSet<string> allowedTrackIds;
+
+    public UnityLeaseReturnGuard(IEnumerable<InitialDeliveryTrackRule> rules)
+    {
+        allowedTrackIds = new HashSet<string>((rules ?? Array.Empty<InitialDeliveryTrackRule>())
+            .Where(rule => rule != null && !string.IsNullOrWhiteSpace(rule.TrackId))
+            .Select(rule => rule.TrackId.Trim()), StringComparer.Ordinal);
+    }
+
+    public AssetReleaseInspection Inspect(string persistentCarGuid)
+    {
+        var baseline = baseGuard.Inspect(persistentCarGuid);
+        return baseline.Status == AssetReleaseStatus.Releasable ? InspectTrack(persistentCarGuid) : baseline;
+    }
+
+    public IReadOnlyDictionary<string, AssetReleaseInspection> InspectBundle(IReadOnlyList<string> persistentCarGuids)
+    {
+        var baseline = baseGuard.InspectBundle(persistentCarGuids);
+        return baseline.ToDictionary(pair => pair.Key,
+            pair => pair.Value.Status == AssetReleaseStatus.Releasable ? InspectTrack(pair.Key) : pair.Value,
+            StringComparer.OrdinalIgnoreCase);
+    }
+
+    private AssetReleaseInspection InspectTrack(string persistentCarGuid)
+    {
+        if (allowedTrackIds.Count == 0)
+            return new AssetReleaseInspection { Status = AssetReleaseStatus.Blocked, Detail = "no-depot-or-service-return-track-configured" };
+        var expected = Guid.Parse(persistentCarGuid);
+        var car = UnityEngine.Object.FindObjectsOfType<TrainCar>().Single(value => value != null && Guid.TryParse(value.CarGUID, out var actual) && actual == expected);
+        var trackId = car.logicCar?.CurrentTrack?.ID?.ToString();
+        return trackId != null && trackId.Length > 0 && allowedTrackIds.Contains(trackId)
+            ? new AssetReleaseInspection { Status = AssetReleaseStatus.Releasable, Detail = "vehicle-is-on-configured-depot-or-service-return-track:" + trackId }
+            : new AssetReleaseInspection { Status = AssetReleaseStatus.Blocked, Detail = "vehicle-not-on-configured-depot-or-service-return-track:" + (trackId ?? "unknown") };
+    }
+}
+
+public sealed class UnityVehicleConditionReader
+{
+    private readonly VehicleAcquisitionSnapshot snapshot;
+    public UnityVehicleConditionReader(VehicleAcquisitionSnapshot snapshot) => this.snapshot = snapshot ?? throw new ArgumentNullException(nameof(snapshot));
+
+    public decimal Read(string assetId)
+    {
+        var car = UnityRollingStockResolver.Resolve(snapshot, assetId) ?? throw new InvalidOperationException("The selected vehicle is not physically present.");
+        var health = car.CarDamage?.EffectiveHealthPercentage ?? throw new InvalidOperationException("The selected vehicle does not expose an authoritative damage model.");
+        if (float.IsNaN(health) || float.IsInfinity(health)) throw new InvalidOperationException("The vehicle condition is invalid.");
+        return Math.Max(0m, Math.Min(1m, (decimal)health));
+    }
+}
+
 public sealed class DelegateAcquisitionCheckpointSink : IAcquisitionCheckpointSink
 {
     private readonly Action<string, AcquisitionState> stage;
