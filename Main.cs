@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using BDVM.Adapters;
 using BDVM.Domain;
 using BDVM.Management;
@@ -374,6 +375,8 @@ public static class Main
             ["shell.css"] = (typeof(WebShellService).Assembly, "BDVM.Web.Assets.shell.css"),
             ["shell.js"] = (typeof(WebShellService).Assembly, "BDVM.Web.Assets.shell.js"),
             ["bootstrap.js"] = (typeof(WebShellService).Assembly, "BDVM.Web.Assets.bootstrap.js"),
+            ["modules/bdvm.dispatch/app.js"] = (typeof(BDVM.Dispatch.DispatchWebModule).Assembly, "BDVM.Dispatch.Assets.app.js"),
+            ["modules/bdvm.dispatch/app.css"] = (typeof(BDVM.Dispatch.DispatchWebModule).Assembly, "BDVM.Dispatch.Assets.app.css"),
             ["modules/bdvm.management/app.js"] = (typeof(ManagementWebModule).Assembly, "BDVM.Management.Assets.app.js"),
             ["modules/bdvm.management/app.css"] = (typeof(ManagementWebModule).Assembly, "BDVM.Management.Assets.app.css")
         };
@@ -3062,8 +3065,7 @@ public static class Main
         if (manager == null) return Array.Empty<RuntimeMissionChoice>();
         var current = manager.currentJobs?.Where(value => value != null) ?? Enumerable.Empty<Job>();
         var all = AccessTools.Field(typeof(JobsManager), "allJobs")?.GetValue(manager) as IEnumerable<Job> ?? Enumerable.Empty<Job>();
-        var passengerMod = UnityModManager.FindMod("PassengerJobs");
-        var passengerBridge = new PassengerJobsRuntimeBridge(passengerMod?.Info?.Version, passengerMod?.Assembly);
+        var passengerBridge = TryCreateOptionalPassengerBridge();
         return current.Concat(all).Where(value => value != null && !string.IsNullOrWhiteSpace(value.ID))
             .GroupBy(value => value.ID, StringComparer.Ordinal).Select(group => group.First())
             .Select(value => new RuntimeMissionChoice
@@ -3075,10 +3077,30 @@ public static class Main
             .OrderBy(value => value.Kind, StringComparer.Ordinal).ThenBy(value => value.MissionId, StringComparer.Ordinal).ToArray();
     }
 
-    private static string MissionKind(PassengerJobsRuntimeBridge bridge, Job job)
+    private static object? TryCreateOptionalPassengerBridge()
     {
-        if (!bridge.Status.IsAvailable) return "Freight";
-        try { return bridge.IsPassengerJob(job) ? "Passenger" : "Freight"; }
+        var passengerMod = UnityModManager.FindMod("PassengerJobs");
+        if (passengerMod?.Assembly == null) return null;
+        try
+        {
+            var bridgeType = Type.GetType("BDVM.PassengerJobsBridge.PassengerJobsRuntimeBridge, BDVM.PassengerJobsBridge", false);
+            return bridgeType == null ? null : Activator.CreateInstance(bridgeType, passengerMod.Info?.Version, passengerMod.Assembly);
+        }
+        catch
+        {
+            // PassengerJobs is an optional integration; unavailable APIs must not break freight snapshots.
+            return null;
+        }
+    }
+
+    private static string MissionKind(object? bridge, Job job)
+    {
+        if (bridge == null) return "Freight";
+        try
+        {
+            var method = bridge.GetType().GetMethod("IsPassengerJob", BindingFlags.Instance | BindingFlags.Public);
+            return method?.Invoke(bridge, new object[] { job }) is bool isPassenger && isPassenger ? "Passenger" : "Freight";
+        }
         catch { return "Freight"; }
     }
 

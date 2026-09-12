@@ -13,12 +13,12 @@ modular Derail Valley project.
 | Manifest version | 0.3.0 |
 | Target framework | .NET Framework 4.8 (`net48`) |
 | Mod loader | Unity Mod Manager 0.27.3 or compatible |
-| Current declared requirements | BDVM `Multiplayer` fork with `MultiplayerAPI` 1.4.0+, `SelfShunt`, `PassengerJobs`, `RemoteDispatchLive` |
+| Current declared requirements | BDVM `Multiplayer` fork with `MultiplayerAPI` 1.4.0+, `SelfShunt`, `RemoteDispatchLive`; PassengerJobs is optional |
 | Release state | Beta development candidate; the first stable release will be 1.0.0 |
 
 ## Included modules
 
-The bundle references `BDVM.Common`, `BDVM.Core`, `BDVM.Companies`, `BDVM.Fleet`, `BDVM.Market`, `BDVM.Operations`, `BDVM.Passengers`, `BDVM.PassengerJobsBridge`, `BDVM.Web`, `BDVM.Dispatch`, `BDVM.Management`, `BDVM.MultiplayerBridge` and `BDVM.SelfShuntBridge`.
+The bundle references `BDVM.Common`, `BDVM.Core`, `BDVM.Companies`, `BDVM.Fleet`, `BDVM.Market`, `BDVM.Operations`, `BDVM.Passengers`, `BDVM.Web`, `BDVM.Dispatch`, `BDVM.Management`, `BDVM.MultiplayerBridge` and `BDVM.SelfShuntBridge`. `BDVM.PassengerJobsBridge` remains an optional integration loaded only when a compatible PassengerJobs runtime is present.
 
 Feature domain and integration files remain owned by their module repositories. `BDVM.Full.csproj` links the sources that are not yet emitted by standalone module packages, preventing duplicate runtime types while preserving repository ownership.
 
@@ -51,7 +51,7 @@ The industrial interface discovers the loaded warehouse network supported by ava
 
 - This is a development composition, not the final per-module distribution.
 - A dedicated server is planned for later; this build remains a solo/host runtime.
-- The current `info.json` requires Multiplayer, SelfShunt, Passenger Jobs and Remote Dispatch Live because their bridges are included. The architecture permits omitting bridges later, but this bundle does not yet package that choice.
+- The current `info.json` requires Multiplayer, SelfShunt and Remote Dispatch Live. PassengerJobs is an optional integration: when its API is unavailable, freight snapshots and management remain usable and passenger features fail closed.
 - The web platform does not grant business authority to browser code; routes expose read models and authenticated intents only.
 - No AI train drivers are included. Maintenance remains player-organized and manual.
 - No compatibility facade or automatic import of unsupported prototype checkpoints is shipped.
@@ -59,7 +59,7 @@ The industrial interface discovers the loaded warehouse network supported by ava
 
 ## Source dependencies
 
-All 14 `BDVM.*` repositories must be siblings under `src/`. Building requires a Derail Valley installation for Unity, game and Unity Mod Manager assemblies. It also requires `MultiplayerAPI.dll` 1.4.0 or later plus compatible `SelfShunt.API.dll` and `PassengerJobs.API.dll` assemblies at the paths expected by the project. `PassengerJobs`, `RemoteDispatchLive`, the BDVM Multiplayer fork and `SelfShunt` are runtime dependencies of the complete profile; PassengerJobs itself requires `DVLangHelper`. Multiplayer API 1.4 supplies the authenticated, durable, initialized-once individual wallets used by remote economic actions; an earlier API is not a compatible complete-profile runtime.
+All 14 `BDVM.*` repositories must be siblings under `src/`. Building requires a Derail Valley installation for Unity, game and Unity Mod Manager assemblies. It also requires `MultiplayerAPI.dll` 1.4.0 or later plus compatible `SelfShunt.API.dll`; `PassengerJobs.API.dll` is needed only to compile the optional PassengerJobs bridge. `RemoteDispatchLive`, the BDVM Multiplayer fork and `SelfShunt` are runtime dependencies of the complete profile, while PassengerJobs and `DVLangHelper` are optional integrations. Multiplayer API 1.4 supplies the authenticated, durable, initialized-once individual wallets used by remote economic actions; an earlier API is not a compatible complete-profile runtime.
 
 ## Build
 

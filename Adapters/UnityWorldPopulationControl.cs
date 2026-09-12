@@ -9,6 +9,7 @@ using BDVM.SelfShuntBridge;
 using DV.Logic.Job;
 using DV.ThingTypes;
 using HarmonyLib;
+using UnityModManagerNet;
 
 namespace BDVM.Adapters;
 
@@ -101,18 +102,48 @@ public static class UnityWorldPopulationControl
             State = WorldPopulationRuntimeState.ClientObserver; ResultCode = "population-control-client-observer";
             Log("activation", WorldPopulationSource.Unknown, context, ResultCode, reason); return;
         }
-        if (!PassengerJobsGenerationControl.TryCreate(out passengerJobs, out var passengerCode)) { AwaitAuthority(passengerCode); return; }
+        var passengerJobsAvailable = TryCreateOptionalPassengerJobsControl(out var passengerCode);
         if (!SelfShuntBridgeLocator.TryCreate(out selfShunt, out var selfShuntCode)) { passengerJobs = null; AwaitAuthority(selfShuntCode); return; }
         var operation = "bdvm-world-population:" + Guid.NewGuid().ToString("N");
-        var report = IndustrialRuntimeGate.TryEnableStrictWithReport(operation, new ITransportGeneratorAdapter[]
+        var generators = new List<ITransportGeneratorAdapter>
         {
             new RuntimeGeneratorAdapter("vanilla", true, SetVanillaJobSuppression, ReadExistingVanillaJobs),
-            new RuntimeGeneratorAdapter("passengerjobs", passengerJobs!.IsAvailable, passengerJobs.TrySet, EmptyJobInventory),
             new RuntimeGeneratorAdapter("selfshunt", selfShunt!.IsAvailable, selfShunt.TrySetStrictEconomyPolicy, EmptyJobInventory)
-        });
+        };
+        if (passengerJobsAvailable && passengerJobs != null)
+            generators.Insert(1, new RuntimeGeneratorAdapter("passengerjobs", true, passengerJobs.TrySet, EmptyJobInventory));
+        var report = IndustrialRuntimeGate.TryEnableStrictWithReport(operation, generators);
         if (!report.Applied) { AwaitAuthority(report.ResultCode); return; }
         State = WorldPopulationRuntimeState.Active; ResultCode = "strict-population-control-active";
-        Log("activation", WorldPopulationSource.Unknown, context, ResultCode, "vanilla, Multiplayer, SelfShunt and PassengerJobs generators are governed; preservedVanillaJobs=" + report.PreservedOpenJobIds.Count);
+        Log("activation", WorldPopulationSource.Unknown, context, ResultCode, "vanilla, Multiplayer and SelfShunt generators are governed; PassengerJobs=" + (passengerJobsAvailable ? "enabled" : "optional-unavailable:" + passengerCode) + "; preservedVanillaJobs=" + report.PreservedOpenJobIds.Count);
+    }
+
+    private static bool TryCreateOptionalPassengerJobsControl(out string resultCode)
+    {
+        passengerJobs = null;
+        var mod = UnityModManager.FindMod("PassengerJobs");
+        if (mod?.Assembly == null)
+        {
+            resultCode = "passengerjobs-optional-not-loaded";
+            return false;
+        }
+
+        try
+        {
+            if (!PassengerJobsGenerationControl.TryCreate(out passengerJobs, out resultCode))
+            {
+                passengerJobs = null;
+                return false;
+            }
+            return true;
+        }
+        catch (Exception exception)
+        {
+            passengerJobs = null;
+            resultCode = "passengerjobs-optional-unavailable";
+            Log("optional-bridge", WorldPopulationSource.Unknown, "PassengerJobs", resultCode, exception.GetType().Name + ": " + exception.Message);
+            return false;
+        }
     }
 
     private static void Refuse(string code)
