@@ -157,14 +157,17 @@ internal static class UnityIndustrialJobAdapter
 
     private static List<float> AllocateCargo(IndustrialContract contract, IReadOnlyList<Car> cars)
     {
-        var remaining = contract.Quantity;
+        var onboard = contract.Manifests.ToDictionary(value => value.AssetId, value => value.OnBoardQuantity, StringComparer.Ordinal);
+        var remaining = contract.Quantity - onboard.Values.Sum();
+        if (remaining < -0.01m) throw new InvalidOperationException("The cargo already aboard exceeds the reserved contract quantity.");
         var result = new List<float>(cars.Count);
         for (var index = 0; index < cars.Count; index++)
         {
             var declared = contract.AssignedWagons[index].Capacity;
             var physical = (decimal)Math.Max(0f, cars[index].capacity);
-            var quantity = Math.Min(remaining, Math.Min(declared, physical));
-            result.Add((float)quantity);
+            var loaded = onboard.TryGetValue(contract.AssignedWagons[index].AssetId, out var observed) ? observed : 0m;
+            var quantity = Math.Min(remaining, Math.Max(0m, Math.Min(declared, physical) - loaded));
+            result.Add((float)(loaded + quantity));
             remaining -= quantity;
         }
         if (remaining > 0.01m) throw new InvalidOperationException("The physically present consist cannot carry the reserved contract quantity.");

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using BDVM.Management;
 using BDVM.Web;
@@ -22,12 +23,12 @@ internal sealed class RuntimeManagementPort : IManagementAuthoritativePort
     public ManagementWebSnapshot ReadSnapshot(string authenticatedPrincipal, string correlationId)
     {
         var source = JObject.Parse(snapshot(authenticatedPrincipal));
-        return new ManagementWebSnapshot
+        var view = new ManagementWebSnapshot
         {
             Version = HighestVersion(source), CorrelationId = correlationId, FeatureFlags = Features(source),
             Companies = Rows(source["companies"]), Wallets = Rows(source["wallets"]), Fleet = Rows(source["fleet"]),
             Market = MarketRows(source), Deliveries = Rows(source["initialDeliveries"]),
-            Leases = Rows(source["leases"], source["outboundLeases"]?["contracts"]),
+            Leases = Array.Empty<IReadOnlyDictionary<string, object>>(),
             Assignments = Rows(source["assignments"]),
             Financing = Rows(source["financing"]?["contracts"], source["financing"]?["pools"]),
             YardPlans = Rows(source["triageAssistance"]?["plans"]),
@@ -38,6 +39,8 @@ internal sealed class RuntimeManagementPort : IManagementAuthoritativePort
             Diagnostics = DiagnosticRows(source),
             Actions = ManagementActions(source)
         };
+        PresentPlayerRows(view, source);
+        return view;
     }
 
     public ManagementAuthorityResult Execute(ManagementAuthorityRequest request)
@@ -55,6 +58,131 @@ internal sealed class RuntimeManagementPort : IManagementAuthoritativePort
         };
     }
 
+    private static string ModelName(JObject source, string id) =>
+        (string?)(source["catalogCandidates"] as JArray)?.FirstOrDefault(value => (string?)value["definitionId"] == id)?["displayName"] ??
+        System.Text.RegularExpressions.Regex.Replace(id, "(?<=[a-z])(?=[A-Z])", " ");
+
+    private static string TransportName(JObject source, JToken row)
+    {
+        var locations = Labels(source["locationChoices"], "id", "name");
+        var cargos = Labels(source["cargoChoices"], "id", "name");
+        string Label(string key, IReadOnlyDictionary<string, string> labels) { var id = (string?)row[key] ?? ""; return labels.TryGetValue(id, out var name) ? name : id; }
+        return Label("originFacilityId", locations) + " → " + Label("destinationFacilityId", locations) + " · " +
+            Label("cargoId", cargos) + " · " + ((decimal?)row["quantity"] ?? 0) + " units · $" +
+            (((long?)row["baseReward"] ?? 0) + ((long?)row["scarcityBonus"] ?? 0)).ToString("N0");
+    }
+
+    private static string Money(long value) => value < 0 ? "−$" + Math.Abs(value).ToString("N0", CultureInfo.InvariantCulture) : "$" + value.ToString("N0", CultureInfo.InvariantCulture);
+    private static string Percent(decimal ratio) => (ratio * 100m).ToString("0") + "%";
+
+    private static void PresentPlayerRows(ManagementWebSnapshot view, JObject source)
+    {
+        var companies = (source["companies"] as JArray ?? new JArray()).ToDictionary(value => (string)value["companyId"]!, value => (string)value["name"]!);
+        string Person(string id) => id == (string?)source["authorityActor"] ? "You" : "Player (" + id.Substring(0, Math.Min(8, id.Length)) + ")";
+        string Account(string id) => id.StartsWith("Company:", StringComparison.Ordinal) && companies.TryGetValue(id.Substring(8), out var name) ? name : id.StartsWith("Player:", StringComparison.Ordinal) ? Person(id.Substring(7)) : id;
+        view.Companies = (source["companies"] as JArray ?? new JArray()).Select(row => (IReadOnlyDictionary<string, object>)new Dictionary<string, object> {
+            ["name"] = (string?)row["name"] ?? "Company", ["leader"] = Person((string?)row["leaderId"] ?? ""),
+            ["members"] = string.Join(", ", (row["members"] as JArray ?? new JArray()).Select(value => Person((string?)value ?? ""))),
+            ["membership"] = (string?)row["membershipPolicy"] == "ApplicationWithApproval" ? "Application with approval" : (string?)row["membershipPolicy"] ?? "",
+            ["technicalDetails"] = row.ToObject<Dictionary<string, object>>()!
+        }).ToArray();
+        view.Wallets = (source["wallets"] as JArray ?? new JArray()).Select(row => (IReadOnlyDictionary<string, object>)new Dictionary<string, object> {
+            ["account"] = Account((string?)row["account"] ?? ""), ["balance"] = "$" + ((long?)row["balance"] ?? 0).ToString("N0"),
+            ["technicalDetails"] = row.ToObject<Dictionary<string, object>>()!
+        }).ToArray();
+        view.Fleet = (source["fleet"] as JArray ?? new JArray()).Select(row => (IReadOnlyDictionary<string, object>)new Dictionary<string, object> {
+            ["name"] = (string?)row["displayName"] == (string?)row["definitionId"] ? ModelName(source, (string?)row["definitionId"] ?? "") : (string?)row["displayName"] ?? "Rolling stock",
+            ["model"] = ModelName(source, (string?)row["definitionId"] ?? ""), ["kind"] = (string?)row["kind"] ?? "Unknown",
+            ["availability"] = (string?)row["state"] == "Stored" ? "Stored — make available in Fleet to use for work" : (string?)row["state"] ?? "Unknown",
+            ["owner"] = Account((string?)row["owner"] ?? ""), ["track"] = (string?)row["lastKnownLocation"] ?? "Not currently located",
+            ["technicalDetails"] = row.ToObject<Dictionary<string, object>>()!
+        }).ToArray();
+        view.Market = (source["market"] as JArray ?? new JArray()).Where(row => (string?)row["state"] == "Available")
+            .Select(row => (IReadOnlyDictionary<string, object>)new Dictionary<string, object> {
+                ["model"] = ModelName(source, (string?)row["definitionId"] ?? ""),
+                ["price"] = "$" + ((long?)row["price"] ?? 0).ToString("N0"),
+                ["delivery"] = (string?)row["locationName"] ?? (string?)row["locationId"] ?? "Depot",
+                ["state"] = "Available to buy", ["technicalDetails"] = row.ToObject<Dictionary<string, object>>()!
+            }).ToArray();
+        view.Deliveries = (source["initialDeliveries"] as JArray ?? new JArray()).Select(row => (IReadOnlyDictionary<string, object>)new Dictionary<string, object> {
+            ["rollingStock"] = string.Join(", ", (row["definitionIds"] as JArray ?? new JArray()).Select(value => ModelName(source, (string?)value ?? ""))),
+            ["state"] = (string?)row["state"] ?? "", ["owner"] = Account((string?)row["owner"] ?? ""),
+            ["placement"] = (string?)row["state"] == "Available" ? "Use the BDVM delivery radio: Start, choose vehicle, aim, choose direction, confirm." : (string?)row["targetTrackId"] ?? "Pending",
+            ["technicalDetails"] = row.ToObject<Dictionary<string, object>>()!
+        }).ToArray();
+        view.Industry = IndustrySiteRows(source);
+        var assets = (source["fleet"] as JArray ?? new JArray()).ToDictionary(row => (string)row["assetId"]!, row => (string?)row["displayName"] ?? ModelName(source, (string?)row["definitionId"] ?? ""));
+        string Vehicles(JToken? ids) => string.Join(", ", (ids as JArray ?? new JArray()).Select(id => assets.TryGetValue((string?)id ?? "", out var name) ? name : "Rolling stock"));
+        view.Leases = (source["leases"] as JArray ?? new JArray()).Select(row => (IReadOnlyDictionary<string, object>)new Dictionary<string, object> {
+            ["vehicles"] = Vehicles(row["assetIds"]), ["state"] = (string?)row["state"] ?? "", ["deposit"] = row["deposit"]?.ToString() ?? "0",
+            ["rentPerInstallment"] = row["rentAmount"]?.ToString() ?? "0", ["technicalDetails"] = row.ToObject<Dictionary<string, object>>()!
+        }).Concat(view.Leases.Where(row => !row.ContainsKey("leaseId"))).ToArray();
+        view.Maintenance = (source["operatingCosts"] as JArray ?? new JArray()).Select(row => (IReadOnlyDictionary<string, object>)new Dictionary<string, object> {
+            ["vehicle"] = assets.TryGetValue((string?)row["assetId"] ?? "", out var name) ? name : "Rolling stock",
+            ["work"] = (string?)row["action"] ?? "Service", ["state"] = (string?)row["state"] ?? "",
+            ["payer"] = Account((string?)row["payer"] ?? ""), ["authorizedBudget"] = row["maximumAuthorizedCost"]?.ToString() ?? "0",
+            ["actualCost"] = row["actualCost"]?.ToString() ?? "0", ["technicalDetails"] = row.ToObject<Dictionary<string, object>>()!
+        }).ToArray();
+    }
+
+    private static IReadOnlyList<IReadOnlyDictionary<string, object>> IndustrySiteRows(JObject source)
+    {
+        var industrial = source["industrial"] as JObject ?? new JObject();
+        var stocks = industrial["stocks"] as JArray ?? new JArray();
+        var recipes = industrial["recipes"] as JArray ?? new JArray();
+        var policies = industrial["policies"] as JArray ?? new JArray();
+        var sites = industrial["sites"] as JArray ?? new JArray();
+        var facilityIds = sites.Select(row => (string?)row["facilityId"] ?? "")
+            .Concat(stocks.Concat(recipes).Select(row => (string?)row["facilityId"] ?? ""))
+            .Concat(policies.SelectMany(row => new[] { (string?)row["originFacilityId"] ?? "", (string?)row["destinationFacilityId"] ?? "" }))
+            .Where(id => id.Length > 0).Distinct(StringComparer.Ordinal).OrderBy(id => id, StringComparer.Ordinal);
+        return facilityIds.Select(facilityId =>
+        {
+            var siteStocks = stocks.Where(row => (string?)row["facilityId"] == facilityId).OrderBy(row => (string?)row["cargoId"], StringComparer.Ordinal).ToArray();
+            var siteRecipes = recipes.Where(row => (string?)row["facilityId"] == facilityId).ToArray();
+            var supportedCargoIds = sites.Where(row => (string?)row["facilityId"] == facilityId).SelectMany(row => row["supportedCargoIds"] as JArray ?? new JArray())
+                .Select(value => (string?)value ?? "").Where(value => value.Length > 0).ToHashSet(StringComparer.Ordinal);
+            var supportedCargo = sites.Where(row => (string?)row["facilityId"] == facilityId)
+                .SelectMany(row => row["supportedCargoIds"] as JArray ?? new JArray()).Select(value => Cargo((string?)value))
+                .Distinct(StringComparer.Ordinal).OrderBy(value => value, StringComparer.Ordinal).ToArray();
+            string Cargo(string? id) => FriendlyCargo(source, id ?? "");
+            string Stock(JToken row)
+            {
+                var role = (string?)row["role"] ?? "Storage";
+                var production = (string?)row["productionState"] ?? "";
+                var suffix = role == "Storage" && production == "NotProducedHere" ? "" : " · " + role + (string.IsNullOrWhiteSpace(production) ? "" : " · " + production);
+                return Cargo((string?)row["cargoId"]) + " — " + ((decimal?)row["onHand"] ?? 0m).ToString("0.##") + " / " + ((decimal?)row["capacity"] ?? 0m).ToString("0.##") + suffix;
+            }
+            // A recipe cadence is an internal simulation detail.  Management
+            // lists the cargo at unit level so it never looks like a player is
+            // required to haul a fixed batch.
+            string Flow(JToken row, string cargoField) => Cargo((string?)row[cargoField]);
+            string PolicyFlow(JToken row, bool outgoing)
+            {
+                var otherFacility = (string?)row[outgoing ? "destinationFacilityId" : "originFacilityId"] ?? "";
+                return Cargo((string?)row["cargoId"]) + (outgoing ? " → " : " ← ") + FriendlyLocation(source, otherFacility);
+            }
+            return (IReadOnlyDictionary<string, object>)new Dictionary<string, object>
+            {
+                ["site"] = FriendlyLocation(source, facilityId),
+                ["role"] = CanonicalIndustryFlows.Roles.TryGetValue(facilityId, out var role) ? role : "Warehouse · local transfer and storage",
+                ["inputs"] = siteRecipes.Where(row => !string.IsNullOrWhiteSpace((string?)row["inputCargoId"])).Select(row => Flow(row, "inputCargoId"))
+                    .Concat(policies.Where(row => (string?)row["destinationFacilityId"] == facilityId).Select(row => PolicyFlow(row, false)))
+                    .Concat(CanonicalIndustryFlows.Inputs.TryGetValue(facilityId, out var inputs) ? inputs.Where(supportedCargoIds.Contains).Select(Cargo) : Array.Empty<string>())
+                    .Distinct(StringComparer.Ordinal).OrderBy(value => value, StringComparer.Ordinal).ToArray(),
+                ["outputs"] = siteRecipes.Where(row => !string.IsNullOrWhiteSpace((string?)row["outputCargoId"])).Select(row => Flow(row, "outputCargoId"))
+                    .Concat(policies.Where(row => (string?)row["originFacilityId"] == facilityId).Select(row => PolicyFlow(row, true)))
+                    .Concat(CanonicalIndustryFlows.Outputs.TryGetValue(facilityId, out var outputs) ? outputs.Where(supportedCargoIds.Contains).Select(Cargo) : Array.Empty<string>())
+                    .Distinct(StringComparer.Ordinal).OrderBy(value => value, StringComparer.Ordinal).ToArray(),
+                ["supportedCargo"] = supportedCargo,
+                ["stocks"] = siteStocks.Length == 0 ? new[] { "Not tracked — no BDVM stock or capacity is configured." } : siteStocks.Select(Stock).ToArray()
+            };
+        }).ToArray();
+    }
+
+    private static string FriendlyLocation(JObject source, string id) => Labels(source["locationChoices"], "id", "name").TryGetValue(id, out var value) ? value : id;
+    private static string FriendlyCargo(JObject source, string id) => Labels(source["cargoChoices"], "id", "name").TryGetValue(id, out var value) ? value : id;
+
     private static string ResolveAction(string intent, string? requested)
     {
         if (intent == "bdvm.management.intent.v1" || intent == "bdvm.management.company-governance.v1") return requested ?? "";
@@ -64,7 +192,7 @@ internal sealed class RuntimeManagementPort : IManagementAuthoritativePort
             ["bdvm.management.fleet-manage.v1"] = requested ?? "fleet.set-state", ["bdvm.management.fleet.rename.v1"] = "fleet.rename",
             ["bdvm.management.fleet-bundle.v1"] = "fleet.bundle", ["bdvm.management.fleet-resale.v1"] = "fleet.resale",
             ["bdvm.management.fleet-maintenance.v1"] = "fleet.maintenance", ["bdvm.management.market.purchase.v1"] = "market.purchase",
-            ["bdvm.management.initial-delivery.v1"] = "initial-delivery.place", ["bdvm.management.lease-manage.v1"] = requested ?? "lease.manage",
+            ["bdvm.management.initial-delivery.v1"] = requested ?? "initial-delivery.place",
             ["bdvm.management.assignment-manage.v1"] = requested ?? "assignment.manage", ["bdvm.management.finance-manage.v1"] = requested ?? "finance.manage",
             ["bdvm.management.yard-manage.v1"] = requested ?? "yard.manage", ["bdvm.management.industry-manage.v1"] = requested ?? "industry.manage"
         };
@@ -136,9 +264,9 @@ internal sealed class RuntimeManagementPort : IManagementAuthoritativePort
             .GroupBy(value => (string)value["assetId"]!, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => FleetLabel(group.First()), StringComparer.Ordinal);
         var fleetDefinitionLabels = (source["fleet"] as JArray ?? new JArray()).OfType<JObject>()
-            .Where(value => !string.IsNullOrWhiteSpace((string?)value["definitionId"]))
+            .Where(value => string.Equals((string?)value["kind"], "FreightWagon", StringComparison.Ordinal) && !string.IsNullOrWhiteSpace((string?)value["definitionId"]))
             .GroupBy(value => (string)value["definitionId"]!, StringComparer.Ordinal)
-            .ToDictionary(group => group.Key, group => ((string?)group.First()["displayName"] ?? group.Key) + " model (ID: " + group.Key + ")", StringComparer.Ordinal);
+            .ToDictionary(group => group.Key, group => ModelName(source, group.Key), StringComparer.Ordinal);
         var fleetDefinitionIds = fleetDefinitionLabels.Keys.OrderBy(value => value, StringComparer.Ordinal).ToArray();
         var missionLabels = Labels(source["missionChoices"], "missionId", "displayName");
         var deliveryTracks = (source["deliveryTracks"] as JArray ?? new JArray())
@@ -164,12 +292,18 @@ internal sealed class RuntimeManagementPort : IManagementAuthoritativePort
             .Select(value => (string?)value["assignmentId"] ?? "").Where(value => value.Length > 0).Distinct(StringComparer.Ordinal).ToArray();
         foreach (var grant in source["initialDeliveries"] as JArray ?? new JArray())
         {
-            if (!string.Equals((string?)grant["state"], "Available", StringComparison.Ordinal)) continue;
+            var state = (string?)grant["state"] ?? "";
             var grantId = (string?)grant["grantId"] ?? "delivery";
-            foreach (var track in deliveryTracks)
-                actions.Add(Action("deliveries", "Place " + grantId + " on " + track.Kind + " " + track.TrackId, "bdvm.management.initial-delivery.v1",
-                    new Dictionary<string, object> { ["grantId"] = grantId, ["trackId"] = track.TrackId, ["targetKind"] = track.Kind },
-                    "Confirm physical placement on this host-approved track."));
+            var rollingStock = string.Join(", ", (grant["definitionIds"] as JArray ?? new JArray()).Select(value => ModelName(source, (string?)value ?? "")));
+            if (state == "Available")
+                foreach (var track in deliveryTracks)
+                    actions.Add(Action("deliveries", "Deliver " + rollingStock + " to " + track.TrackId, "bdvm.management.initial-delivery.v1",
+                        new Dictionary<string, object> { ["action"] = "initial-delivery.place", ["grantId"] = grantId, ["trackId"] = track.TrackId, ["targetKind"] = track.Kind },
+                        "Confirm physical placement on this host-approved track."));
+            if (state == "PlacementPending" || state == "ReconcileRequired")
+                actions.Add(Action("deliveries", "Reconcile physical delivery — " + rollingStock, "bdvm.management.initial-delivery.v1",
+                    new Dictionary<string, object> { ["action"] = "initial-delivery.reconcile", ["grantId"] = grantId },
+                    "BDVM will inspect the original target track and match the exact physical vehicle before changing state."));
         }
 
         var catalogCandidates = (source["catalogCandidates"] as JArray ?? new JArray())
@@ -184,10 +318,10 @@ internal sealed class RuntimeManagementPort : IManagementAuthoritativePort
                 "This creates an explicit host-priced catalog entry and may publish one finite-stock offer.",
                 ChoiceField("definitionId", "Installed rolling-stock model", catalogCandidates, Labels(source["catalogCandidates"], "definitionId", "displayName")),
                 ChoiceField("locationId", "Delivery depot or service track", deliveryTracks.Select(value => value.TrackId).ToArray(), deliveryTrackLabels),
-                Field("basePrice", "Base purchase price", "number", "100000", true),
+                Field("basePrice", "Base purchase price", "number", "10", true),
                 Field("transferFee", "Transfer fee", "number", "0", true),
                 Field("buybackRate", "Perfect-condition buyback rate", "number", "0.5", true),
-                Field("initialStock", "Initial finite stock", "number", "1", true)));
+                Field("initialStock", "Initial finite stock", "number", "10", true)));
 
         foreach (var stock in source["marketStock"] as JArray ?? new JArray())
         {
@@ -204,22 +338,8 @@ internal sealed class RuntimeManagementPort : IManagementAuthoritativePort
         {
             if (!string.Equals((string?)listing["state"], "Available", StringComparison.Ordinal)) continue;
             var listingId = (string?)listing["listingId"] ?? "";
-            actions.Add(Action("market", "Purchase " + ((string?)listing["definitionId"] ?? "listing"), "bdvm.management.market.purchase.v1",
+            actions.Add(Action("market", "Buy " + ModelName(source, (string?)listing["definitionId"] ?? "") + " — $" + ((long?)listing["price"] ?? 0).ToString("N0"), "bdvm.management.market.purchase.v1",
                 new Dictionary<string, object> { ["listingId"] = listingId }, "Confirm this purchase.", Field("forCompany", "Company pays", "checkbox")));
-            actions.Add(Action("leases", "Offer lease for " + ((string?)listing["definitionId"] ?? "listing"), "bdvm.management.lease-manage.v1",
-                new Dictionary<string, object> { ["action"] = "lease.manage", ["operation"] = string.Equals((string?)listing["kind"], "NewOrder", StringComparison.Ordinal) ? "create-catalog-listings" : "create-existing", [string.Equals((string?)listing["kind"], "NewOrder", StringComparison.Ordinal) ? "listingIds" : "assetIds"] = new[] { string.Equals((string?)listing["kind"], "NewOrder", StringComparison.Ordinal) ? listingId : ((string?)listing["assetId"] ?? "") } }, "",
-                LeaseTermFields()));
-        }
-
-        foreach (var lease in source["leases"] as JArray ?? new JArray())
-        {
-            var id = (string?)lease["leaseId"] ?? ""; var state = (string?)lease["state"] ?? "";
-            if (state == "Offered") actions.Add(Action("leases", "Accept " + id, "bdvm.management.lease-manage.v1", new Dictionary<string, object> { ["action"] = "lease.manage", ["operation"] = "accept", ["leaseId"] = id }, "Confirm this lease commitment.", Field("forCompany", "Company pays and operates", "checkbox")));
-            if (state == "Active" || state == "Delinquent" || state == "ReturnDue")
-            {
-                actions.Add(Action("leases", "Return " + id, "bdvm.management.lease-manage.v1", new Dictionary<string, object> { ["action"] = "lease.manage", ["operation"] = "return", ["leaseId"] = id }, "The whole consist must be safe on a configured depot or service track."));
-                actions.Add(Action("leases", "Purchase " + id, "bdvm.management.lease-manage.v1", new Dictionary<string, object> { ["action"] = "lease.manage", ["operation"] = "purchase", ["leaseId"] = id }, "Confirm the explicit purchase option."));
-            }
         }
 
         foreach (var fleet in source["fleet"] as JArray ?? new JArray())
@@ -245,7 +365,13 @@ internal sealed class RuntimeManagementPort : IManagementAuthoritativePort
         }
 
         var passengerLocations = locationLabels.Keys.OrderBy(value => value, StringComparer.Ordinal).ToArray();
-        actions.Add(Action("passengers", "Create a passenger route", "bdvm.management.assignment-manage.v1", new Dictionary<string, object> { ["action"] = "assignment.manage", ["operation"] = "passenger-configure-route" }, "",
+        actions.Add(Action("passengers", "Open a passenger route", "bdvm.management.assignment-manage.v1",
+            new Dictionary<string, object> { ["action"] = "assignment.manage", ["operation"] = "passenger-configure-route",
+                ["initialDemand"] = 20, ["maximumDemand"] = 100, ["growthPerCycle"] = 5, ["frequencyTicks"] = 100, ["baseFare"] = 100, ["latePenalty"] = 1 },
+            "Open this route using the host's standard demand and fare settings.",
+            ChoiceField("originId", "Departure station", passengerLocations, locationLabels),
+            ChoiceField("destinationId", "Arrival station", passengerLocations, locationLabels)));
+        actions.Add(Action("passengers", "Configure passenger route", "bdvm.management.assignment-manage.v1", new Dictionary<string, object> { ["action"] = "assignment.manage", ["operation"] = "passenger-configure-route" }, "",
             ChoiceField("originId", "Departure station", passengerLocations, locationLabels), ChoiceField("destinationId", "Arrival station", passengerLocations, locationLabels), Field("initialDemand", "Passengers waiting initially", "number", "20", true), Field("maximumDemand", "Maximum waiting passengers", "number", "100", true), Field("growthPerCycle", "New passengers per demand cycle", "number", "5", true), Field("frequencyTicks", "Target service interval", "number", "100", true), Field("baseFare", "Fare per passenger", "number", "100", true), Field("latePenalty", "Late penalty per time unit", "number", "1", true)));
         actions.Add(Action("passengers", "Reserve passenger service", "bdvm.management.assignment-manage.v1", new Dictionary<string, object> { ["action"] = "assignment.manage", ["operation"] = "passenger-reserve" }, "",
             ChoiceField("routeId", "Passenger route", passengerRouteIds, PassengerRouteLabels(source, locationLabels)), ChoiceField("passengerJobId", "Loaded Passenger Jobs service", passengerMissionIds, missionLabels), ChoiceField("assetIds", "Passenger rolling stock", visibleAssetIds, fleetLabels, true), Field("capacity", "Available passenger seats", "number", "1", true), Field("journeyTicks", "Planned journey duration", "number", "100", true), Field("forCompany", "Company operation", "checkbox")));
@@ -259,43 +385,11 @@ internal sealed class RuntimeManagementPort : IManagementAuthoritativePort
             if (state == "Reserved" || state == "Active" || state == "CompletionPending") actions.Add(Action("passengers", "Cancel " + id, "bdvm.management.assignment-manage.v1", new Dictionary<string, object> { ["action"] = "assignment.manage", ["operation"] = "passenger-cancel", ["contractId"] = id }, "Confirm cancellation of the Passenger Jobs service first."));
         }
 
-        var pilotPersonalWagons = source["industrial"]?["pilotPersonalWagons"]?.Values<string>().Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value!).ToArray() ?? Array.Empty<string>();
-        var pilotCompanyWagons = source["industrial"]?["pilotCompanyWagons"]?.Values<string>().Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value!).ToArray() ?? Array.Empty<string>();
-        if (pilotPersonalWagons.Length > 0)
-            actions.Add(Action("industry", "Discover stations and configure a personal pilot chain", "bdvm.management.industry-manage.v1",
-                new Dictionary<string, object> { ["action"] = "industry.manage", ["operation"] = "configure-pilot", ["forCompany"] = false },
-                "Choose your wagons. BDVM automatically finds compatible cargo and two loaded stations, creates stock and production, then publishes the first transport offer.", ChoiceField("assetIds", "Freight wagons to use", pilotPersonalWagons, fleetLabels, true)));
-        if (pilotCompanyWagons.Length > 0)
-            actions.Add(Action("industry", "Discover stations and configure a company pilot chain", "bdvm.management.industry-manage.v1",
-                new Dictionary<string, object> { ["action"] = "industry.manage", ["operation"] = "configure-pilot", ["forCompany"] = true },
-                "Choose company wagons. BDVM automatically finds compatible cargo and two loaded stations, creates stock and production, then publishes the first transport offer.", ChoiceField("assetIds", "Company freight wagons to use", pilotCompanyWagons, fleetLabels, true)));
         actions.Add(Action("industry", "Configure industrial stock", "bdvm.management.industry-manage.v1", new Dictionary<string, object> { ["action"] = "industry.manage", ["operation"] = "configure-stock" }, "", ChoiceField("facilityId", "Station", passengerLocations, locationLabels), ChoiceField("cargoId", "Cargo", cargoLabels.Keys.OrderBy(value => value, StringComparer.Ordinal).ToArray(), cargoLabels), Field("onHand", "Quantity currently available", "number", "0", true), Field("capacity", "Maximum storage capacity", "number", "100", true)));
         actions.Add(Action("industry", "Configure production recipe", "bdvm.management.industry-manage.v1", new Dictionary<string, object> { ["action"] = "industry.manage", ["operation"] = "configure-recipe" }, "", Field("recipeId", "Internal recipe name", "text", "production-1", true), ChoiceField("facilityId", "Producing station", passengerLocations, locationLabels), ChoiceField("inputCargoId", "Cargo consumed", cargoLabels.Keys.OrderBy(value => value, StringComparer.Ordinal).ToArray(), cargoLabels), Field("inputQuantity", "Quantity consumed", "number", "10", true), ChoiceField("outputCargoId", "Cargo produced", cargoLabels.Keys.OrderBy(value => value, StringComparer.Ordinal).ToArray(), cargoLabels), Field("outputQuantity", "Quantity produced", "number", "10", true), Field("cadenceTicks", "Production interval", "number", "60", true), Field("maximumBacklogCycles", "Maximum stored production cycles", "number", "4", true)));
-        actions.Add(Action("industry", "Configure shortage-driven transport policy", "bdvm.management.industry-manage.v1", new Dictionary<string, object> { ["action"] = "industry.manage", ["operation"] = "configure-policy" }, "", Field("policyId", "Internal policy name", "text", "transport-policy-1", true), ChoiceField("originFacilityId", "Cargo pickup station", passengerLocations, locationLabels), ChoiceField("destinationFacilityId", "Cargo delivery station", passengerLocations, locationLabels), ChoiceField("cargoId", "Cargo", cargoLabels.Keys.OrderBy(value => value, StringComparer.Ordinal).ToArray(), cargoLabels), Field("batchQuantity", "Maximum cargo per offer", "number", "30", true), Field("destinationTargetQuantity", "Target stock at destination", "number", "60", true), Field("baseReward", "Base payment", "number", "15000", true), Field("maximumScarcityBonus", "Maximum shortage bonus", "number", "5000", true), Field("offerLifetimeTicks", "Time before an unaccepted offer expires", "number", "600", true), Field("preparationDurationTicks", "Time allowed to prepare wagons", "number", "600", true), Field("deliveryDurationTicks", "Time allowed for delivery", "number", "3600", true), Field("preparationPenalty", "Penalty if preparation expires", "number", "0"), Field("minimumWagonCount", "Minimum number of wagons", "number", "1", true), Field("minimumTotalCapacity", "Minimum cargo capacity", "number", "30", true), ChoiceField("allowedDefinitionIds", "Allowed wagon models", fleetDefinitionIds, fleetDefinitionLabels, true), Field("enabled", "Publish offers from this policy", "checkbox", "true")));
-        actions.Add(Action("industry", "Create one manual transport contract", "bdvm.management.industry-manage.v1", new Dictionary<string, object> { ["action"] = "industry.manage", ["operation"] = "create" }, "", ChoiceField("originFacilityId", "Cargo pickup station", passengerLocations, locationLabels), ChoiceField("destinationFacilityId", "Cargo delivery station", passengerLocations, locationLabels), ChoiceField("cargoId", "Cargo", cargoLabels.Keys.OrderBy(value => value, StringComparer.Ordinal).ToArray(), cargoLabels), Field("quantity", "Cargo quantity", "number", "30", true), Field("baseReward", "Base payment", "number", "15000", true), Field("scarcityBonus", "Shortage bonus", "number", "0", true), Field("deadlineTick", "Delivery deadline", "number", "3600", true), Field("minimumWagonCount", "Minimum number of wagons", "number", "1", true), Field("minimumTotalCapacity", "Minimum cargo capacity", "number", "30", true), ChoiceField("allowedDefinitionIds", "Allowed wagon models", fleetDefinitionIds, fleetDefinitionLabels, true), Field("preparationPenalty", "Preparation expiry penalty", "number", "0"), Field("forCompany", "Company operation", "checkbox")));
+        actions.Add(Action("industry", "Configure stock flow", "bdvm.management.industry-manage.v1", new Dictionary<string, object> { ["action"] = "industry.manage", ["operation"] = "configure-policy", ["offerLifetimeTicks"] = 600, ["preparationDurationTicks"] = 600, ["preparationPenalty"] = 0 }, "This defines a permanent stock relationship, not an offer or contract.", Field("policyId", "Internal flow name", "text", "stock-flow-1", true), ChoiceField("originFacilityId", "Cargo pickup company", passengerLocations, locationLabels), ChoiceField("destinationFacilityId", "Cargo receiving company", passengerLocations, locationLabels), ChoiceField("cargoId", "Cargo", cargoLabels.Keys.OrderBy(value => value, StringComparer.Ordinal).ToArray(), cargoLabels), Field("batchQuantity", "Maximum quantity per movement", "number", "30", true), Field("destinationTargetQuantity", "Desired destination stock", "number", "60", true), Field("baseReward", "Reference payment before stock adjustment", "number", "15000", true), Field("maximumScarcityBonus", "Maximum shortage bonus", "number", "5000", true), Field("estimatedOperatingCost", "Expected fuel, consumables and wear", "number", "8000", true), Field("deliveryDurationTicks", "Expected delivery duration", "number", "3600", true), Field("minimumWagonCount", "Minimum number of wagons", "number", "1", true), Field("minimumTotalCapacity", "Minimum cargo capacity", "number", "30", true), ChoiceField("allowedDefinitionIds", "Allowed wagon models", fleetDefinitionIds, fleetDefinitionLabels, true), Field("enabled", "Expose this live stock flow", "checkbox", "true")));
         foreach (var recipe in source["industrial"]?["recipes"] as JArray ?? new JArray())
             actions.Add(Action("industry", "Advance production for " + ((string?)recipe["recipeId"] ?? "recipe"), "bdvm.management.industry-manage.v1", new Dictionary<string, object> { ["action"] = "industry.manage", ["operation"] = "advance-production", ["recipeId"] = (string?)recipe["recipeId"] ?? "" }));
-        foreach (var policy in source["industrial"]?["policies"] as JArray ?? new JArray())
-            if ((bool?)policy["enabled"] ?? false)
-                actions.Add(Action("industry", "Publish need for " + ((string?)policy["policyId"] ?? "policy"), "bdvm.management.industry-manage.v1", new Dictionary<string, object> { ["action"] = "industry.manage", ["operation"] = "publish-need", ["policyId"] = (string?)policy["policyId"] ?? "" }));
-        foreach (var need in source["industrial"]?["needs"] as JArray ?? new JArray())
-            if (string.Equals((string?)need["state"], "Available", StringComparison.Ordinal))
-                actions.Add(Action("industry", "Accept transport need " + ((string?)need["needId"] ?? "need"), "bdvm.management.industry-manage.v1", new Dictionary<string, object> { ["action"] = "industry.manage", ["operation"] = "accept-need", ["needId"] = (string?)need["needId"] ?? "", ["needVersion"] = (long?)need["version"] ?? 0 }, "Confirm this stock and capacity reservation.", Field("forCompany", "Company operation", "checkbox")));
-        foreach (var contract in source["industrial"]?["contracts"] as JArray ?? new JArray())
-        {
-            var id = (string?)contract["contractId"] ?? ""; var state = (string?)contract["state"] ?? "";
-            if (state == "Offered") actions.Add(Action("industry", "Accept " + id, "bdvm.management.industry-manage.v1", new Dictionary<string, object> { ["action"] = "industry.manage", ["operation"] = "accept", ["contractId"] = id }, "", Field("preparationDuration", "Preparation duration", "number", "100", true), Field("applyPreparationPenalty", "Apply preparation penalty", "checkbox"), Field("forCompany", "Company operation", "checkbox")));
-            if (state == "Reserved")
-            {
-                var personal = contract["compatiblePersonalWagons"]?.Values<string>().Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value!).ToArray() ?? Array.Empty<string>();
-                var company = contract["compatibleCompanyWagons"]?.Values<string>().Where(value => !string.IsNullOrWhiteSpace(value)).Select(value => value!).ToArray() ?? Array.Empty<string>();
-                if (personal.Length > 0) actions.Add(Action("industry", "Assign personal wagons to " + id, "bdvm.management.industry-manage.v1", new Dictionary<string, object> { ["action"] = "industry.manage", ["operation"] = "assign", ["contractId"] = id, ["forCompany"] = false }, "", Field("assetIds", "Compatible operator wagons", "multiselect", "", true, personal)));
-                if (company.Length > 0) actions.Add(Action("industry", "Assign company wagons to " + id, "bdvm.management.industry-manage.v1", new Dictionary<string, object> { ["action"] = "industry.manage", ["operation"] = "assign", ["contractId"] = id, ["forCompany"] = true }, "", Field("assetIds", "Compatible company wagons", "multiselect", "", true, company)));
-            }
-            if (state == "Reserved") actions.Add(Action("industry", "Activate " + id, "bdvm.management.industry-manage.v1", new Dictionary<string, object> { ["action"] = "industry.manage", ["operation"] = "activate", ["contractId"] = id }));
-            if (state == "Active" || state == "DeliveryPending") actions.Add(Action("industry", "Reconcile physical delivery " + id, "bdvm.management.industry-manage.v1", new Dictionary<string, object> { ["action"] = "industry.manage", ["operation"] = "reconcile-delivery", ["contractId"] = id }));
-            if (state == "Offered" || state == "Reserved" || state == "Active" || state == "DeliveryPending") actions.Add(Action("industry", "Cancel " + id, "bdvm.management.industry-manage.v1", new Dictionary<string, object> { ["action"] = "industry.manage", ["operation"] = "cancel", ["contractId"] = id }, "Abandon any external SelfShunt job first, then confirm contract cancellation."));
-        }
 
         var financingPools = (source["financing"]?["pools"] as JArray ?? new JArray())
             .Select(value => (string?)value["poolId"] ?? "").Where(value => value.Length > 0).Distinct(StringComparer.Ordinal).ToArray();
@@ -324,6 +418,16 @@ internal sealed class RuntimeManagementPort : IManagementAuthoritativePort
                 actions.Add(Action("yardPlans", "Cancel " + ((string?)plan["planId"] ?? "plan"), "bdvm.management.yard-manage.v1", new Dictionary<string, object> { ["action"] = "yard.manage", ["operation"] = "cancel", ["planId"] = (string?)plan["planId"] ?? "" }));
 
         actions.Add(Action("companies", "Dissolve company", "bdvm.management.company-dissolve.v1", new Dictionary<string, object>(), "This dissolution is permanent."));
+        foreach (var vehicle in source["fleet"] as JArray ?? new JArray())
+        {
+            var id = (string?)vehicle["assetId"] ?? "";
+            var label = FleetLabel((JObject)vehicle);
+            if ((string?)vehicle["state"] == "Stored")
+                actions.Add(Action("fleet", "Make available for work — " + label, "bdvm.management.fleet-manage.v1",
+                    new Dictionary<string, object> { ["action"] = "fleet.set-state", ["assetId"] = id, ["state"] = "Available" }));
+            actions.Add(Action("fleet", "Rename — " + label, "bdvm.management.fleet.rename.v1",
+                new Dictionary<string, object> { ["assetId"] = id }, "", Field("displayName", "Vehicle name", "text", (string?)vehicle["displayName"] ?? "", true)));
+        }
         return actions;
     }
 
@@ -334,10 +438,10 @@ internal sealed class RuntimeManagementPort : IManagementAuthoritativePort
         new ManagementActionField { Name = name, Label = label, Kind = kind, Value = value, Required = required, Options = options ?? Array.Empty<string>() };
 
     private static ManagementActionField ChoiceField(string name, string label, IReadOnlyList<string> options, bool multiple = false) =>
-        Field(name, label, options.Count == 0 ? (multiple ? "csv" : "text") : (multiple ? "multiselect" : "select"), options.FirstOrDefault() ?? "", true, options);
+        Field(name, label, multiple ? "multiselect" : "select", options.FirstOrDefault() ?? "", true, options);
 
     private static ManagementActionField ChoiceField(string name, string label, IReadOnlyList<string> options, IReadOnlyDictionary<string, string> optionLabels, bool multiple = false) =>
-        new ManagementActionField { Name = name, Label = label, Kind = options.Count == 0 ? (multiple ? "csv" : "text") : (multiple ? "multiselect" : "select"), Value = options.FirstOrDefault() ?? "", Required = true, Options = options, OptionLabels = optionLabels };
+        new ManagementActionField { Name = name, Label = label, Kind = multiple ? "multiselect" : "select", Value = options.FirstOrDefault() ?? "", Required = true, Options = options, OptionLabels = optionLabels };
 
     private static Dictionary<string, string> Labels(JToken? source, string idProperty, string nameProperty) =>
         (source as JArray ?? new JArray()).OfType<JObject>()
@@ -346,7 +450,7 @@ internal sealed class RuntimeManagementPort : IManagementAuthoritativePort
             .ToDictionary(group => group.Key, group =>
             {
                 var name = ((string?)group.First()[nameProperty] ?? group.Key).Trim();
-                return name + " (ID: " + group.Key + ")";
+                return name;
             }, StringComparer.Ordinal);
 
     private static string FleetLabel(JObject value)
@@ -354,7 +458,7 @@ internal sealed class RuntimeManagementPort : IManagementAuthoritativePort
         var id = (string?)value["assetId"] ?? "unknown";
         var name = (string?)value["displayName"] ?? (string?)value["definitionId"] ?? "Rolling stock";
         var location = (string?)value["lastKnownLocation"] ?? "location unknown";
-        return name + " — " + location + " (ID: " + id + ")";
+        return name + " — " + location;
     }
 
     private static Dictionary<string, string> PassengerRouteLabels(JObject source, IReadOnlyDictionary<string, string> locations) =>

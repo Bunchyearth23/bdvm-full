@@ -13,6 +13,7 @@
     <AssemblySearchPaths>$(AssemblySearchPaths);$(GameDir)\DerailValley_Data\Managed;$(GameDir)\DerailValley_Data\Managed\UnityModManager</AssemblySearchPaths>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Remove="tests\**\*.cs" />
     <ProjectReference Include="..\BDVM.Common\BDVM.Common.csproj" />
     <ProjectReference Include="..\BDVM.Core\BDVM.Core.csproj" />
     <ProjectReference Include="..\BDVM.Web\BDVM.Web.csproj" />
@@ -41,6 +42,7 @@
   </ItemGroup>
   <ItemGroup>
     <Reference Include="Assembly-CSharp" Private="false" />
+    <Reference Include="System.Net.Http" />
     <Reference Include="BezierCurves" Private="false" />
     <Reference Include="0Harmony" HintPath="$(GameDir)\DerailValley_Data\Managed\UnityModManager\0Harmony.dll" Private="false" />
     <Reference Include="DV.ThingTypes" Private="false" />

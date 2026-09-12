@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using DV;
+using System.Reflection;
 using BDVM.Domain;
 using HarmonyLib;
 
@@ -24,11 +25,11 @@ public static class UnityAssetCleanupProtection
 
     internal static bool ShouldProtect(TrainCar? car)
     {
-        if (!enabled || car == null || string.IsNullOrWhiteSpace(car.CarGUID) || stateReader == null || authority == null || !NetworkAuthorityPolicy.CanExecuteEconomy(authority.Detect(), out _)) return false;
+        if (!enabled || !IsManaged(car)) return false;
         try
         {
-            var state = stateReader();
-            if (state == null || !AssetLifecycleProtectionPolicy.IsProtected(state, car.CarGUID)) return false;
+            var state = stateReader!();
+            if (state == null || !AssetLifecycleProtectionPolicy.IsProtected(state, car!.CarGUID)) return false;
             if (Logged.Add(car.CarGUID)) log?.Invoke("[correlation=asset-lifecycle] [event=asset-cleanup-protected] carGuid=" + car.CarGUID + ", hook=CarVisitChecker.IsRecentlyVisited");
             return true;
         }
@@ -37,6 +38,35 @@ public static class UnityAssetCleanupProtection
             log?.Invoke("[correlation=asset-lifecycle] [event=asset-cleanup-protection-refused] " + exception.Message);
             return false;
         }
+    }
+
+    internal static bool IsManaged(TrainCar? car)
+    {
+        if (car == null || string.IsNullOrWhiteSpace(car.CarGUID) || stateReader == null || authority == null || !NetworkAuthorityPolicy.CanExecuteEconomy(authority.Detect(), out _)) return false;
+        try
+        {
+            var state = stateReader();
+            return state != null && AssetLifecycleProtectionPolicy.IsProtected(state, car.CarGUID);
+        }
+        catch (Exception exception)
+        {
+            log?.Invoke("[correlation=asset-lifecycle] [event=asset-radio-protection-refused] " + exception.Message);
+            return false;
+        }
+    }
+}
+
+/// <summary>Prevents the vanilla radio from clearing rolling stock tracked by BDVM.</summary>
+[HarmonyPatch(typeof(CommsRadioCarDeleter), nameof(CommsRadioCarDeleter.OnUse))]
+internal static class BDVMRadioCarDeleterPatch
+{
+    [HarmonyPrefix, HarmonyPriority(Priority.First)]
+    private static bool Prefix(CommsRadioCarDeleter __instance, TrainCar ___pointedCar, TrainCar ___carToDelete)
+    {
+        var car = ___carToDelete != null ? ___carToDelete : ___pointedCar;
+        if (!UnityAssetCleanupProtection.IsManaged(car)) return true;
+        AccessTools.Method(typeof(CommsRadioCarDeleter), "ClearFlags")?.Invoke(__instance, null);
+        return false;
     }
 }
 

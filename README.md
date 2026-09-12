@@ -30,7 +30,7 @@ Starter rolling stock is delivered with the native comms radio. Select **BDVM DE
 
 The beta validation interface can create one end-to-end starter freight job after the three delivered flatcars are placed together on a compatible warehouse track. It selects a real cargo and destination warehouse, uses the owned CarGUIDs in a persistent SelfShunt job chain, and relies on the game's normal booklet, loading machine, unloading machine and payment flow. It never creates replacement wagons.
 
-The industrial interface also discovers a real loaded origin/destination warehouse pair for selected available freight wagons controlled by the player or company. It configures persistent stock, a bounded production recipe and a shortage-driven transport policy, then publishes a reservable need. After acceptance and wagon assignment, BDVM creates a zero-wage SelfShunt job using exactly those physical wagons. Loading and unloading are reconciled per wagon; BDVM alone pays the frozen contract reward. Correlations survive save/reload, cancellation requires authoritative external abandonment, and production resumes without creating rolling stock.
+The industrial interface discovers the loaded warehouse network supported by available freight wagons and derives live transport choices directly from persistent source stock and destination shortages. Nothing is published, accepted, expired or reserved: the operator chooses a quantity and exact owned/company wagons, and BDVM immediately creates a zero-wage SelfShunt movement. Observed physical loading removes source stock; observed unloading adds destination stock and settles a payment recalculated from current scarcity. Source-only and sink-only recipes keep the graph live, while route, fuel, consumables and wear estimates can make a poor movement unprofitable. Correlations survive save/reload, cancellation conserves in-transit cargo, and no rolling stock is created for transport work.
 
 - Initialize host-authoritative player, company and wallet state from the loaded career.
 - Persist BDVM checkpoints through the Derail Valley save hook.
@@ -38,7 +38,7 @@ The industrial interface also discovers a real loaded origin/destination warehou
 - Exercise audited acquisition and resale flows through Unity vehicle adapters.
 - Protect economically owned assets from unsafe cleanup.
 - Compose finite-market, licensing, financing, industrial, mission and passenger domain services.
-- Publish station transport needs and expose host-computed personal/company wagon choices to the in-game and Management interfaces.
+- Project live station stock needs and expose direct host-validated quantity and personal/company wagon choices to Management without offer or reservation objects.
 - Validate that a compatible Passenger Jobs runtime is present before accepting a passenger mission ID.
 - Register Dispatch and Management web modules.
 - Adapt the current browser transport through the BDVM Remote Dispatch fork.
