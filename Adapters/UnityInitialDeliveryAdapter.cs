@@ -1,6 +1,8 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using BDVM.Adapters;
 using BDVM.Domain;
 using DV;
@@ -17,6 +19,9 @@ internal sealed class UnityInitialDeliveryAdapter : IInitialDeliveryPort
     private readonly IReadOnlyDictionary<string, double> requestedStartSpans;
     private readonly IReadOnlyDictionary<string, bool> requestedDirections;
     private readonly VehicleAcquisitionSnapshot? snapshot;
+    private static readonly BindingFlags PrivateStatic = BindingFlags.Static | BindingFlags.NonPublic;
+    private static readonly MethodInfo? GetUninitializedSpawnDataMethod = typeof(CarSpawner).GetMethod("GetUninitializedSpawnData", PrivateStatic);
+    private static readonly MethodInfo? PopulateSpawnDataMethod = typeof(CarSpawner).GetMethod("PopulateSpawnData", PrivateStatic);
 
     public UnityInitialDeliveryAdapter(IEnumerable<InitialDeliveryTrackRule> rules, IReadOnlyDictionary<string, double>? requestedStartSpans = null,
         IReadOnlyDictionary<string, bool>? requestedDirections = null, VehicleAcquisitionSnapshot? snapshot = null)
@@ -80,6 +85,177 @@ internal sealed class UnityInitialDeliveryAdapter : IInitialDeliveryPort
                     : Refused("spawn-exception-before-world-effect:" + exception.GetType().Name);
             }
         }
+    }
+
+    public IEnumerator PlaceCoroutine(string operationId, string trackId, InitialDeliveryTargetKind targetKind,
+        IReadOnlyList<string> definitionIds, Action<InitialDeliveryPortResult> completed)
+    {
+        if (completed == null) throw new ArgumentNullException(nameof(completed));
+        InitialDeliveryPortResult? knownResult = null;
+        lock (Gate)
+        {
+            if (Completed.TryGetValue(operationId, out var known)) knownResult = InspectKnown(known);
+        }
+        if (knownResult != null) { completed(knownResult); yield break; }
+        if (!UnityWorldPopulationControl.ShouldRun(WorldPopulationSource.PurchasedDelivery, "bdvm:UnityInitialDeliveryAdapter.PlaceCoroutine"))
+        {
+            completed(Refused("world-population-policy-refused"));
+            yield break;
+        }
+        var preflight = Preflight(operationId + ":preflight", trackId, targetKind, definitionIds);
+        if (preflight.Outcome != WorldOwnershipOutcome.Applied)
+        {
+            completed(preflight);
+            yield break;
+        }
+        yield return null;
+
+        RailTrack track;
+        List<TrainCarLivery> liveries;
+        object spawnData;
+        string preparationError;
+        if (!TryPrepareSpawnData(trackId, definitionIds, out track, out liveries, out spawnData, out preparationError))
+        {
+            completed(Unknown(preparationError));
+            yield break;
+        }
+        yield return null;
+
+        var carDataField = spawnData.GetType().GetField("carData", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        var carData = carDataField?.GetValue(spawnData) as Array;
+        if (carData == null || carData.Length != liveries.Count)
+        {
+            completed(Unknown("spawn-data-incomplete-component-set"));
+            yield break;
+        }
+        var spawned = new List<TrainCar>(carData.Length);
+        var itemType = carData.GetType().GetElementType()!;
+        var prefabField = itemType.GetField("prefab", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        var positionField = itemType.GetField("position", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        var forwardField = itemType.GetField("forward", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        var reversedField = itemType.GetField("orientationReversed", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        if (prefabField == null || positionField == null || forwardField == null || reversedField == null)
+        {
+            completed(Unknown("spawn-async-api-unavailable"));
+            yield break;
+        }
+        var reversed = new bool[carData.Length];
+        for (var index = 0; index < carData.Length; index++)
+        {
+            var item = carData.GetValue(index)!;
+            if (!TrySpawnCarFromData(item, prefabField, positionField, forwardField, reversedField, track, out var car, out var orientationReversed))
+            {
+                completed(Unknown("spawn-returned-incomplete-component-set"));
+                yield break;
+            }
+            spawned.Add(car!);
+            reversed[index] = orientationReversed;
+            yield return null;
+        }
+
+        var last = spawned.Count - 1;
+        if (!TryFinalizeConsist(spawned, reversed))
+        {
+            completed(Unknown("spawn-finalization-failed"));
+            yield break;
+        }
+        yield return null;
+
+        var guids = spawned.Select(x => Guid.Parse(x.CarGUID).ToString("D")).ToArray();
+        lock (Gate) Completed[operationId] = guids;
+        completed(Applied(guids, "spawn-confirmed-async"));
+    }
+
+    private bool TryPrepareSpawnData(string trackId, IReadOnlyList<string> definitionIds, out RailTrack track,
+        out List<TrainCarLivery> liveries, out object spawnData, out string error)
+    {
+        track = null!; liveries = null!; spawnData = null!; error = "spawn-async-preparation-failed";
+        try
+        {
+            track = ResolveTrack(trackId);
+            liveries = ResolveLiveries(definitionIds);
+            var consistLength = CarSpawner.Instance.GetTotalCarLiveriesLength(liveries, true);
+            var requested = requestedStartSpans.TryGetValue(trackId, out var span) ? span - consistLength / 2d : 10d;
+            var startSpan = Math.Max(5d, Math.Min(requested, track.curve.length - consistLength - 5d));
+            var flip = requestedDirections.TryGetValue(trackId, out var withTrackDirection) && !withTrackDirection;
+            spawnData = PrepareSpawnData(liveries, track, startSpan, flip);
+            return true;
+        }
+        catch (Exception exception) { error = "spawn-async-preparation:" + exception.GetType().Name; return false; }
+    }
+
+    private static bool TrySpawnCar(GameObject prefab, RailTrack track, Vector3 position, Vector3 forward, out TrainCar? car)
+    {
+        try
+        {
+            car = CarSpawner.Instance.SpawnCar(prefab, track, position, forward, false, false);
+            return car != null && Guid.TryParse(car.CarGUID, out var guid) && guid != Guid.Empty;
+        }
+        catch { car = null; return false; }
+    }
+
+    private static bool TrySpawnCarFromData(object item, FieldInfo prefabField, FieldInfo positionField, FieldInfo forwardField,
+        FieldInfo reversedField, RailTrack track, out TrainCar? car, out bool orientationReversed)
+    {
+        try
+        {
+            var prefab = prefabField.GetValue(item) as GameObject;
+            if (prefab == null) { car = null; orientationReversed = false; return false; }
+            orientationReversed = (bool)reversedField.GetValue(item)!;
+            return TrySpawnCar(prefab, track, (Vector3)positionField.GetValue(item)!, (Vector3)forwardField.GetValue(item)!, out car);
+        }
+        catch { car = null; orientationReversed = false; return false; }
+    }
+
+    private static object PrepareSpawnData(List<TrainCarLivery> liveries, RailTrack track, double startSpan, bool flip)
+    {
+        if (GetUninitializedSpawnDataMethod == null || PopulateSpawnDataMethod == null)
+            throw new MissingMethodException(typeof(CarSpawner).FullName, "SpawnData preparation API");
+        var orientations = liveries.Select(_ => false).ToList();
+        var spawnData = GetUninitializedSpawnDataMethod.Invoke(null, new object[] { liveries, orientations, track, flip });
+        if (spawnData == null) throw new InvalidOperationException("CarSpawner returned no spawn data.");
+        var args = new object[] { spawnData, startSpan, 0d };
+        PopulateSpawnDataMethod.Invoke(null, args);
+        return args[0] ?? throw new InvalidOperationException("CarSpawner populated no spawn data.");
+    }
+
+    private static void SetPreventAutoCouple(TrainCar car, object coupler)
+    {
+        if (coupler == null) return;
+        var property = coupler.GetType().GetProperty("preventAutoCouple", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        if (property != null && property.CanWrite) property.SetValue(coupler, true, null);
+        else coupler.GetType().GetField("preventAutoCouple", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.SetValue(coupler, true);
+    }
+
+    private static void ApplyHandbrake(TrainCar car)
+    {
+        var member = (MemberInfo?)typeof(TrainCar).GetField("brakeSystem", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            ?? typeof(TrainCar).GetProperty("brakeSystem", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        var brakeSystem = member switch
+        {
+            FieldInfo field => field.GetValue(car),
+            PropertyInfo property => property.GetValue(car, null),
+            _ => null
+        };
+        if (brakeSystem == null) return;
+        var hasHandbrake = brakeSystem.GetType().GetProperty("hasHandbrake", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(brakeSystem, null)
+            ?? brakeSystem.GetType().GetField("hasHandbrake", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(brakeSystem);
+        if (!(hasHandbrake is bool available) || !available) return;
+        brakeSystem.GetType().GetMethod("SetHandbrakePosition", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            ?.Invoke(brakeSystem, new object[] { 1f, true });
+    }
+
+    private static bool TryFinalizeConsist(IReadOnlyList<TrainCar> spawned, IReadOnlyList<bool> reversed)
+    {
+        try
+        {
+            var last = spawned.Count - 1;
+            SetPreventAutoCouple(spawned[0], reversed[0] ? spawned[0].rearCoupler : spawned[0].frontCoupler);
+            SetPreventAutoCouple(spawned[last], reversed[last] ? spawned[last].frontCoupler : spawned[last].rearCoupler);
+            ApplyHandbrake(UnityEngine.Random.value < 0.5f ? spawned[0] : spawned[last]);
+            return true;
+        }
+        catch { return false; }
     }
 
     public InitialDeliveryPortResult Inspect(string operationId, string trackId, InitialDeliveryTargetKind targetKind, IReadOnlyList<string> definitionIds)

@@ -41,7 +41,7 @@ internal static class UnityIndustrialJobAdapter
         {
             if (jobsById[contract.ContractId].Length != 1)
                 throw new InvalidOperationException("Multiple loaded SelfShunt jobs match persisted industrial contract " + contract.ContractId + ".");
-            if (!lifecycle.TryRegister(Registration(contract)))
+            if (!lifecycle.TryRegister(Registration(snapshot, contract)))
                 throw new InvalidOperationException("SelfShunt refused recovery of persisted industrial job " + contract.ContractId + ".");
             restored++;
         }
@@ -96,7 +96,7 @@ internal static class UnityIndustrialJobAdapter
         if (destination == null) throw new InvalidOperationException("No compatible unloading track exists at " + contract.DestinationFacilityId + ".");
 
         var existing = AllJobs().FirstOrDefault(value => value != null && string.Equals(value.ID, contract.ContractId, StringComparison.Ordinal));
-        var registration = Registration(contract);
+        var registration = Registration(snapshot, contract);
         if (!lifecycle.TryRegister(registration)) throw new InvalidOperationException("SelfShunt refused the externally-authoritative zero-wage job registration.");
         if (existing != null) return "SelfShunt job " + contract.ContractId + " was already present and was re-correlated.";
 
@@ -129,13 +129,14 @@ internal static class UnityIndustrialJobAdapter
         return "Created zero-wage SelfShunt job " + contract.ContractId + " for " + trainCars.Length + " operator wagon(s).";
     }
 
-    private static SelfShuntExternalJobRegistration Registration(IndustrialContract contract) => new SelfShuntExternalJobRegistration
+    private static SelfShuntExternalJobRegistration Registration(VehicleAcquisitionSnapshot snapshot, IndustrialContract contract) => new SelfShuntExternalJobRegistration
     {
         OperationId = "industrial-contract-register:" + contract.ContractId,
         JobId = contract.ContractId,
         StationId = contract.OriginFacilityId,
         CargoId = contract.CargoId,
-        DisplayReward = checked(contract.BaseReward + contract.ScarcityBonus)
+        DisplayReward = checked(contract.BaseReward + contract.ScarcityBonus),
+        DisplayName = Main.IndustrialContractDisplayName(snapshot, contract)
     };
 
     private static TrainCar[] ResolveAssignedCars(VehicleAcquisitionSnapshot snapshot, IndustrialContract contract)

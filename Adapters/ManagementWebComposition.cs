@@ -257,6 +257,11 @@ internal sealed class RuntimeManagementPort : IManagementAuthoritativePort
     private static IReadOnlyList<ManagementActionDescriptor> ManagementActions(JObject source)
     {
         var actions = new List<ManagementActionDescriptor>();
+        var actorId = (string?)source["authorityActor"] ?? "";
+        var companyRows = (source["companies"] as JArray ?? new JArray()).OfType<JObject>().ToArray();
+        var membershipRequests = (source["membershipRequests"] as JArray ?? new JArray()).OfType<JObject>().ToArray();
+        var currentCompany = companyRows.SingleOrDefault(company =>
+            (company["members"] as JArray ?? new JArray()).Any(member => string.Equals((string?)member, actorId, StringComparison.Ordinal)));
         var locationLabels = Labels(source["locationChoices"], "id", "name");
         var cargoLabels = Labels(source["cargoChoices"], "id", "name");
         var fleetLabels = (source["fleet"] as JArray ?? new JArray()).OfType<JObject>()
@@ -417,7 +422,87 @@ internal sealed class RuntimeManagementPort : IManagementAuthoritativePort
             if (string.Equals((string?)plan["state"], "Planned", StringComparison.Ordinal) || string.Equals((string?)plan["state"], "ExecutionPending", StringComparison.Ordinal))
                 actions.Add(Action("yardPlans", "Cancel " + ((string?)plan["planId"] ?? "plan"), "bdvm.management.yard-manage.v1", new Dictionary<string, object> { ["action"] = "yard.manage", ["operation"] = "cancel", ["planId"] = (string?)plan["planId"] ?? "" }));
 
-        actions.Add(Action("companies", "Dissolve company", "bdvm.management.company-dissolve.v1", new Dictionary<string, object>(), "This dissolution is permanent."));
+        if (currentCompany == null)
+        {
+            actions.Add(Action("companies", "Create a company", "bdvm.management.company-governance.v1",
+                new Dictionary<string, object> { ["action"] = "company.create" }, "Create this company with you as its leader.",
+                Field("name", "Company name", "text", "", true)));
+
+            foreach (var company in companyRows.Where(company => !(bool?)company["liquidating"] ?? false).OrderBy(company => (string?)company["name"], StringComparer.OrdinalIgnoreCase))
+            {
+                var companyId = (string?)company["companyId"] ?? "";
+                var companyName = (string?)company["name"] ?? companyId;
+                var policy = (string?)company["membershipPolicy"] ?? "";
+                var pending = membershipRequests.Any(request => string.Equals((string?)request["playerId"], actorId, StringComparison.Ordinal) &&
+                    string.Equals((string?)request["companyId"], companyId, StringComparison.Ordinal) &&
+                    string.Equals((string?)request["kind"], "Application", StringComparison.Ordinal) &&
+                    string.Equals((string?)request["state"], "Pending", StringComparison.Ordinal));
+                if (policy != "InvitationOnly" && !pending)
+                    actions.Add(Action("companies", "Request to join " + companyName, "bdvm.management.company-governance.v1",
+                        new Dictionary<string, object> { ["action"] = "company.apply", ["companyId"] = companyId },
+                        "Submit an application to this company."));
+            }
+
+            foreach (var request in membershipRequests.Where(request =>
+                string.Equals((string?)request["playerId"], actorId, StringComparison.Ordinal) &&
+                string.Equals((string?)request["kind"], "Invitation", StringComparison.Ordinal) &&
+                string.Equals((string?)request["state"], "Pending", StringComparison.Ordinal)))
+            {
+                var requestId = (string?)request["requestId"] ?? "";
+                var company = companyRows.SingleOrDefault(row => string.Equals((string?)row["companyId"], (string?)request["companyId"], StringComparison.Ordinal));
+                var companyName = (string?)company?["name"] ?? (string?)request["companyId"] ?? "company";
+                actions.Add(Action("companies", "Accept invitation from " + companyName, "bdvm.management.company-governance.v1",
+                    new Dictionary<string, object> { ["action"] = "company.respond-invitation", ["requestId"] = requestId, ["accept"] = true }));
+                actions.Add(Action("companies", "Decline invitation from " + companyName, "bdvm.management.company-governance.v1",
+                    new Dictionary<string, object> { ["action"] = "company.respond-invitation", ["requestId"] = requestId, ["accept"] = false },
+                    "Decline this invitation."));
+            }
+        }
+        else
+        {
+            var companyId = (string?)currentCompany["companyId"] ?? "";
+            var companyName = (string?)currentCompany["name"] ?? companyId;
+            var members = (currentCompany["members"] as JArray ?? new JArray()).Values<string>()
+                .Where(member => !string.IsNullOrWhiteSpace(member) && !string.Equals(member, actorId, StringComparison.Ordinal))
+                .Select(member => member!).Distinct(StringComparer.Ordinal).ToArray();
+            var isLeader = string.Equals((string?)currentCompany["leaderId"], actorId, StringComparison.Ordinal);
+            actions.Add(Action("companies", "Change membership policy — " + companyName, "bdvm.management.company-governance.v1",
+                new Dictionary<string, object> { ["action"] = "company.policy", ["companyId"] = companyId }, "",
+                ChoiceField("policy", "Membership policy", new[] { "ApplicationWithApproval", "InvitationOnly", "Open" })));
+            actions.Add(Action("companies", "Invite a player — " + companyName, "bdvm.management.company-governance.v1",
+                new Dictionary<string, object> { ["action"] = "company.invite", ["companyId"] = companyId }, "",
+                Field("targetPlayerId", "Target player ID", "text", "", true)));
+
+            foreach (var request in membershipRequests.Where(request =>
+                string.Equals((string?)request["companyId"], companyId, StringComparison.Ordinal) &&
+                string.Equals((string?)request["kind"], "Application", StringComparison.Ordinal) &&
+                string.Equals((string?)request["state"], "Pending", StringComparison.Ordinal)))
+            {
+                var requestId = (string?)request["requestId"] ?? "";
+                var applicant = (string?)request["playerId"] ?? "player";
+                actions.Add(Action("companies", "Accept application from " + applicant, "bdvm.management.company-governance.v1",
+                    new Dictionary<string, object> { ["action"] = "company.decide-application", ["requestId"] = requestId, ["accept"] = true }));
+                actions.Add(Action("companies", "Refuse application from " + applicant, "bdvm.management.company-governance.v1",
+                    new Dictionary<string, object> { ["action"] = "company.decide-application", ["requestId"] = requestId, ["accept"] = false },
+                    "Refuse this membership application."));
+            }
+
+            if (members.Length > 0)
+            {
+                if (isLeader)
+                    actions.Add(Action("companies", "Transfer leadership — " + companyName, "bdvm.management.company-governance.v1",
+                        new Dictionary<string, object> { ["action"] = "company.transfer-leadership", ["companyId"] = companyId }, "Transfer leadership to this member.",
+                        ChoiceField("memberId", "New leader", members)));
+                actions.Add(Action("companies", "Manage member permissions — " + companyName, "bdvm.management.company-governance.v1",
+                    new Dictionary<string, object> { ["action"] = "company.permission", ["companyId"] = companyId }, "",
+                    ChoiceField("memberId", "Member", members), ChoiceField("permission", "Permission", new[] { "ManageMembers", "ManagePermissions", "ManageFunds", "Dissolve", "ManageFleet" }),
+                    Field("enabled", "Granted", "checkbox", "true")));
+            }
+            if (!isLeader)
+                actions.Add(Action("companies", "Leave company — " + companyName, "bdvm.management.company-governance.v1",
+                    new Dictionary<string, object> { ["action"] = "company.leave" }, "Leave this company."));
+            actions.Add(Action("companies", "Dissolve company", "bdvm.management.company-dissolve.v1", new Dictionary<string, object>(), "This dissolution is permanent."));
+        }
         foreach (var vehicle in source["fleet"] as JArray ?? new JArray())
         {
             var id = (string?)vehicle["assetId"] ?? "";
@@ -427,6 +512,10 @@ internal sealed class RuntimeManagementPort : IManagementAuthoritativePort
                     new Dictionary<string, object> { ["action"] = "fleet.set-state", ["assetId"] = id, ["state"] = "Available" }));
             actions.Add(Action("fleet", "Rename — " + label, "bdvm.management.fleet.rename.v1",
                 new Dictionary<string, object> { ["assetId"] = id }, "", Field("displayName", "Vehicle name", "text", (string?)vehicle["displayName"] ?? "", true)));
+            if (currentCompany != null && string.Equals((string?)vehicle["owner"], "Player:" + actorId, StringComparison.Ordinal))
+                actions.Add(Action("fleet", "Transfer to company — " + label, "bdvm.management.fleet-manage.v1",
+                    new Dictionary<string, object> { ["action"] = "fleet.transfer", ["assetId"] = id },
+                    "Transfer this personal vehicle to your company. The company becomes its owner."));
         }
         return actions;
     }

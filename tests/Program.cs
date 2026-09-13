@@ -26,6 +26,14 @@ internal static class Program
         Require((string)view.Fleet[0]["track"] == "SM-T12P", "Live track must be preserved.");
         Require(view.Fleet[0].ContainsKey("technicalDetails"), "Technical identities must remain available.");
         Require(view.Actions.Any(a => a.Label.StartsWith("Buy DE2") && (string)a.Payload["listingId"] == "offer"), "Readable buy action must retain exact listing identity.");
+        Require(view.Actions.Any(a => a.Area == "companies" && a.Label.StartsWith("Change membership policy")), "Company members must receive governance controls in Management.");
+        Require(view.Actions.Any(a => a.Area == "companies" && a.Label.StartsWith("Invite a player")), "Company members must be able to invite a player in Management.");
+        var independent = new RuntimeManagementPort(_ => @"{
+          'authorityActor':'independent',
+          'companies':[{'companyId':'open-co','name':'Open Railway','leaderId':'leader','members':['leader'],'membershipPolicy':'Open','liquidating':false}]
+        }", (_, __) => "{}").ReadSnapshot("independent", "join");
+        Require(independent.Actions.Any(a => a.Label == "Create a company" && a.Fields.Any(f => f.Name == "name")), "Independent players must be able to create a company.");
+        Require(independent.Actions.Any(a => a.Label == "Request to join Open Railway" && (string)a.Payload["companyId"] == "open-co"), "Independent players must be able to request company membership.");
         Require(!view.Actions.Any(a => a.Area == "industry" && a.Label.StartsWith("Run stock transport")), "Transport dossier creation belongs to Dispatch, not the Industry information view.");
         Require(!view.Actions.Any(a => a.Area == "industry" && (a.Label.Contains("Reserve transport") || a.Label.StartsWith("Publish need") || a.Label.StartsWith("Accept "))), "Stock-driven industry must expose no offer publication, acceptance or reservation action.");
         Require(view.Actions.Any(a => a.Label.StartsWith("Reconcile physical delivery") && (string)a.Payload["grantId"] == "grant-reconcile" && (string)a.Payload["action"] == "initial-delivery.reconcile"), "A pending physical delivery must expose its dedicated reconciliation action.");
@@ -36,7 +44,7 @@ internal static class Program
         Require(((string[])steelMill["supportedCargo"]).Contains("Steel") && ((string[])steelMill["supportedCargo"]).Contains("Ore"), "Every warehouse-compatible cargo must remain visible without being misrepresented as an input or output.");
         Require(((string[])factory["stocks"]).Single().Contains("Not tracked"), "A loaded warehouse without BDVM configuration must still be visible.");
         Require(view.Actions.Where(a => a.Area == "industry").SelectMany(a => a.Fields).Where(f => f.Name == "allowedDefinitionIds").All(f => f.Options.SequenceEqual(new[] { "FlatbedEmpty" })), "Locomotives must never be offered as freight wagons.");
-        Console.WriteLine("Management presentation: 11/11 passed"); return 0;
+        Console.WriteLine("Management presentation: 17/17 passed"); return 0;
     }
     static void Require(bool condition, string message) { if (!condition) throw new Exception(message); }
 }

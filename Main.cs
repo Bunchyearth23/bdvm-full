@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -164,6 +165,7 @@ public static class Main
     private static int walletSyncFrames;
     private static int populationControlRetryFrames;
     private static double economicClockAccumulator;
+    private static long economicTicksSinceSave;
     private static double pendingTimeSkipTicks;
     private static IServer? configuredServer;
     private static IClient? configuredClient;
@@ -189,6 +191,7 @@ public static class Main
     private static readonly Dictionary<string, WebSession> managementWebTransportSessions = new Dictionary<string, WebSession>(StringComparer.Ordinal);
     private static SelfShuntIndustrialLifecycleAdapter? selfShuntIndustrialLifecycle;
     private static bool industrialCorrelationsRestored;
+    private static readonly HashSet<string> pendingInitialDeliveryOperations = new HashSet<string>(StringComparer.Ordinal);
 
     public static bool Load(UnityModManager.ModEntry modEntry)
     {
@@ -558,11 +561,12 @@ public static class Main
         if (runtimeStateProvider?.Current == null || runtimeRoleDetector == null || Time.timeScale <= 0f || deltaTime <= 0f ||
             !NetworkAuthorityPolicy.CanExecuteEconomy(runtimeRoleDetector.Detect(), out _)) return;
         economicClockAccumulator += deltaTime;
-        var activeTicks = (long)Math.Floor(economicClockAccumulator);
-        var skippedTicks = (long)Math.Floor(pendingTimeSkipTicks);
-        if (activeTicks < 10 && skippedTicks <= 0) return;
+        var activeTicks = Math.Min((long)Math.Floor(economicClockAccumulator), 1L);
+        var skippedTicks = Math.Min((long)Math.Floor(pendingTimeSkipTicks), 1L);
+        if (activeTicks < 1 && skippedTicks <= 0) return;
         if (activeTicks > 0) economicClockAccumulator -= activeTicks;
         if (skippedTicks > 0) pendingTimeSkipTicks -= skippedTicks;
+        economicTicksSinceSave = checked(economicTicksSinceSave + activeTicks + skippedTicks);
         var snapshot = runtimeStateProvider.Current;
         var correlation = "economic-clock:" + snapshot.LeaseClock.ActiveTick + ":" + activeTicks + ":" + skippedTicks;
         var domainCommitted = false; var externalDebited = false; long previewDelta = 0;
@@ -604,7 +608,12 @@ public static class Main
             }
             foreach (var remoteActor in remoteActors)
                 SettleRemoteWalletToInternal(remoteActor, correlation + ":after:" + remoteActor);
-            if (!SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance)) throw new InvalidOperationException("Economic clock state could not be staged in SaveGameData.");
+            SaveGameRuntimeHook.MarkDirty();
+            if (skippedTicks > 0 || economicTicksSinceSave >= 60)
+            {
+                if (!SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance)) throw new InvalidOperationException("Economic clock state could not be staged in SaveGameData.");
+                economicTicksSinceSave = 0;
+            }
             if (skippedTicks > 0)
                 entry.Logger.Log("[correlation=" + correlation + "] [event=economic-clock-advanced] activeTicks=" + activeTicks + ", timeSkipTicks=" + skippedTicks + ", tick=" + tick + ", personalDelta=" + (personalAfter - personalBefore));
         }
@@ -613,6 +622,7 @@ public static class Main
             if (!domainCommitted)
             {
                 if (externalDebited) hostWallet.Credit(-previewDelta);
+                economicTicksSinceSave = Math.Max(0, economicTicksSinceSave - activeTicks - skippedTicks);
                 economicClockAccumulator += activeTicks;
                 pendingTimeSkipTicks += skippedTicks;
                 entry.Logger.Error("[correlation=" + correlation + "] [event=economic-clock-refused-before-commit] externalRefunded=" + externalDebited + ", error=" + exception);
@@ -797,7 +807,7 @@ public static class Main
         DrawMissionAssignments(entry, snapshot, company != null);
         DrawIndustrialEconomy(entry, snapshot, company != null);
         DrawTriageAssistance(entry, snapshot);
-        DrawPassengerEconomy(entry, snapshot, company != null);
+        if (runtimeSettings.EnablePassengerEconomy) DrawPassengerEconomy(entry, snapshot, company != null);
     }
 
     private static void DrawIndependentGovernance(UnityModManager.ModEntry entry, VehicleAcquisitionSnapshot snapshot, PlayerEconomicState player)
@@ -1278,12 +1288,59 @@ public static class Main
             var directions = withTrackDirection.HasValue ? new Dictionary<string, bool>(StringComparer.Ordinal) { [rule.TrackId] = withTrackDirection.Value } : null;
             var snapshot = runtimeStateProvider!.Current!;
             var adapter = new UnityInitialDeliveryAdapter((runtimeSettings.InitialDeliveryTracks ?? new List<InitialDeliveryTrackRule>()).Concat(new[] { rule }), spans, directions, snapshot);
-            var result = runtimeStateProvider.PlaceLocalInitialDelivery("initial-delivery:" + correlation, grant.GrantId, rule.TrackId, rule.Kind, runtimeRoleDetector!, adapter, new SaveGameInitialDeliveryCheckpointPort(entry));
-            if (!SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance)) throw new InvalidOperationException("Initial delivery state could not be staged in SaveGameData.");
-            status = "Initial delivery: " + result.State + " / " + result.ResultCode + ".";
-            entry.Logger.Log("[correlation=" + correlation + "] [event=initial-delivery] grant=" + result.GrantId + ", owner=" + result.Owner.Key + ", track=" + result.TargetTrackId + ", kind=" + result.TargetKind + ", components=" + string.Join(",", result.AssetIds) + ", state=" + result.State + ", result=" + result.ResultCode);
+            var commandId = "initial-delivery:" + correlation;
+            QueueInitialDelivery(entry, runtimeStateProvider.LocalPlayerId!, commandId, grant, rule, adapter);
         }
-        catch (Exception exception) { status = "Initial delivery refused: " + exception.Message; entry.Logger.Error("[correlation=" + correlation + "] [event=initial-delivery-refused] grant=" + grant.GrantId + ", track=" + rule.TrackId + ", error=" + exception); }
+        catch (Exception exception) { pendingInitialDeliveryOperations.Remove("initial-delivery:" + correlation); status = "Initial delivery refused: " + exception.Message; entry.Logger.Error("[correlation=" + correlation + "] [event=initial-delivery-refused] grant=" + grant.GrantId + ", track=" + rule.TrackId + ", error=" + exception); }
+    }
+
+    private static InitialDeliveryGrant QueueInitialDelivery(UnityModManager.ModEntry entry, string actorId, string commandId,
+        InitialDeliveryGrant grant, InitialDeliveryTrackRule rule, UnityInitialDeliveryAdapter adapter)
+    {
+        if (inGameWindow == null) throw new InvalidOperationException("Delivery scheduler is not ready.");
+        if (!pendingInitialDeliveryOperations.Add(commandId)) return grant;
+        var result = runtimeStateProvider!.PrepareInitialDeliveryFor(commandId, actorId, grant.GrantId, rule.TrackId, rule.Kind,
+            runtimeRoleDetector!, adapter, new SaveGameInitialDeliveryCheckpointPort(entry));
+        if (result.State != InitialDeliveryState.PlacementPending)
+        {
+            pendingInitialDeliveryOperations.Remove(commandId);
+            status = "Initial delivery: " + result.State + " / " + result.ResultCode + ".";
+            return result;
+        }
+        status = "Initial delivery queued; placement continues in the background.";
+        inGameWindow.StartCoroutine(CompleteInitialDeliveryCoroutine(entry, actorId, commandId, result, rule, adapter));
+        return result;
+    }
+
+    private static IEnumerator CompleteInitialDeliveryCoroutine(UnityModManager.ModEntry entry, string actorId, string commandId, InitialDeliveryGrant prepared,
+        InitialDeliveryTrackRule rule, UnityInitialDeliveryAdapter adapter)
+    {
+        InitialDeliveryPortResult? placement = null;
+        yield return adapter.PlaceCoroutine(commandId + ":spawn", rule.TrackId, rule.Kind, prepared.DefinitionIds, result => placement = result);
+        if (placement == null)
+        {
+            status = "Initial delivery requires reconciliation: scheduler returned no result.";
+            pendingInitialDeliveryOperations.Remove(commandId);
+            yield break;
+        }
+        CompleteInitialDeliveryResult(entry, actorId, commandId, prepared, adapter, placement);
+        pendingInitialDeliveryOperations.Remove(commandId);
+    }
+
+    private static void CompleteInitialDeliveryResult(UnityModManager.ModEntry entry, string actorId, string commandId, InitialDeliveryGrant prepared,
+        UnityInitialDeliveryAdapter adapter, InitialDeliveryPortResult placement)
+    {
+        try
+        {
+            var result = runtimeStateProvider!.CompleteInitialDeliveryFor(commandId, actorId, prepared.GrantId, placement, runtimeRoleDetector!, adapter, new SaveGameInitialDeliveryCheckpointPort(entry));
+            status = "Initial delivery: " + result.State + " / " + result.ResultCode + ".";
+            entry.Logger.Log("[correlation=" + commandId + "] [event=initial-delivery] grant=" + result.GrantId + ", owner=" + result.Owner.Key + ", track=" + result.TargetTrackId + ", kind=" + result.TargetKind + ", components=" + string.Join(",", result.AssetIds) + ", state=" + result.State + ", result=" + result.ResultCode);
+        }
+        catch (Exception exception)
+        {
+            status = "Initial delivery requires reconciliation: " + exception.Message;
+            entry.Logger.Error("[correlation=" + commandId + "] [event=initial-delivery-async-failed] grant=" + prepared.GrantId + ", error=" + exception);
+        }
     }
 
     private static IReadOnlyList<InitialDeliveryGrant> PendingInitialDeliveries() => runtimeStateProvider?.Current?.InitialDeliveries
@@ -1997,6 +2054,7 @@ public static class Main
             var beneficiary = forCompany ? AccountRef.Company(player.CompanyId ?? throw new InvalidOperationException("Company membership is required.")) : AccountRef.Player(player.PlayerId);
             var payer = need.PreparationPenalty > 0 ? beneficiary : null;
             var contract = IndustrialEngine(snapshot).AcceptTransportNeed("industrial-need-accept:" + correlation, need.NeedId, need.Version, beneficiary, payer, snapshot.LeaseClock.ActiveTick);
+            StampIndustrialContractCreator(snapshot, contract, runtimeStateProvider.LocalPlayerId);
             selectedIndustrialContractId = contract.ContractId; StageIndustrialSave(); status = "Transport need accepted and cargo reserved: " + contract.ContractId + ".";
             entry.Logger.Log("[correlation=" + correlation + "] [event=industrial-need-accepted] need=" + need.NeedId + ", contract=" + contract.ContractId + ", beneficiary=" + beneficiary.Key);
         }
@@ -2014,6 +2072,7 @@ public static class Main
             var beneficiary = forCompany ? AccountRef.Company(player.CompanyId ?? throw new InvalidOperationException("Company membership is required.")) : AccountRef.Player(player.PlayerId);
             var contract = IndustrialEngine(snapshot).CreateTransportOffer("BDVM-CT-" + correlation, industrialFacilityId, industrialDestinationId, industrialCargoId, quantity,
                 beneficiary, reward, bonus, snapshot.LeaseClock.ActiveTick, 0, new WagonRequirement { CargoId = industrialCargoId, MinimumWagonCount = 1, MinimumTotalCapacity = quantity }, penalty);
+            StampIndustrialContractCreator(snapshot, contract, runtimeStateProvider.LocalPlayerId);
             selectedIndustrialContractId = contract.ContractId; StageIndustrialSave(); status = "Industrial contract created: " + contract.ContractId + ".";
             entry.Logger.Log("[correlation=" + correlation + "] [event=industrial-contract-created] contract=" + contract.ContractId + ", origin=" + contract.OriginFacilityId + ", destination=" + contract.DestinationFacilityId + ", cargo=" + contract.CargoId + ", quantity=" + contract.Quantity + ", beneficiary=" + contract.Beneficiary.Key);
         }
@@ -2846,6 +2905,12 @@ public static class Main
             throw new InvalidOperationException(reason);
     }
 
+    private static void RequireSuccessfulCompanyCommand(CommandRecord record)
+    {
+        if (record == null) throw new InvalidOperationException("The company command returned no result.");
+        if (record.State != CommandState.Succeeded) throw new InvalidOperationException(record.ResultCode);
+    }
+
     private static string ResolveAuthenticatedRuntimeActor(string transportIdentity, VehicleAcquisitionSnapshot snapshot, bool isLoopbackRequest = false)
     {
         if (isLoopbackRequest)
@@ -2867,6 +2932,49 @@ public static class Main
             snapshot.Economy.Players.Select(value => value.PlayerId), connected);
         runtimeStateProvider!.EnsurePersistentPlayer(actorId, 0);
         return actorId;
+    }
+
+    internal static void StampIndustrialContractCreator(VehicleAcquisitionSnapshot snapshot, IndustrialContract contract, string? transportIdentity)
+    {
+        if (snapshot == null) throw new ArgumentNullException(nameof(snapshot));
+        if (contract == null) throw new ArgumentNullException(nameof(contract));
+        if (string.IsNullOrWhiteSpace(contract.CreatorDisplayName))
+            contract.CreatorDisplayName = ResolveIndustrialCreatorName(snapshot, contract.Beneficiary, transportIdentity);
+    }
+
+    internal static string IndustrialContractDisplayName(VehicleAcquisitionSnapshot snapshot, IndustrialContract contract)
+    {
+        if (snapshot == null) throw new ArgumentNullException(nameof(snapshot));
+        if (contract == null) throw new ArgumentNullException(nameof(contract));
+        var creator = string.IsNullOrWhiteSpace(contract.CreatorDisplayName)
+            ? ResolveIndustrialCreatorName(snapshot, contract.Beneficiary, null)
+            : contract.CreatorDisplayName.Trim();
+        var route = FriendlyLocationName(contract.OriginFacilityId) + " → " + FriendlyLocationName(contract.DestinationFacilityId);
+        var cargo = FriendlyIdentifier(contract.CargoId);
+        return BoundIndustrialDisplayName(creator + " · " + route + " · " + cargo, creator);
+    }
+
+    private static string ResolveIndustrialCreatorName(VehicleAcquisitionSnapshot snapshot, AccountRef beneficiary, string? transportIdentity)
+    {
+        if (beneficiary.Kind == AccountKind.Company)
+        {
+            var company = snapshot.Economy.Companies.SingleOrDefault(value => string.Equals(value.CompanyId, beneficiary.OwnerId, StringComparison.Ordinal));
+            return BoundIndustrialDisplayName(company?.Name, "Company " + beneficiary.OwnerId);
+        }
+        var candidate = transportIdentity?.Trim();
+        if (!string.IsNullOrWhiteSpace(candidate) && !candidate!.StartsWith("mp-", StringComparison.OrdinalIgnoreCase) &&
+            !candidate.StartsWith("player:", StringComparison.OrdinalIgnoreCase))
+            return BoundIndustrialDisplayName(candidate, "Independent");
+        var owner = beneficiary.OwnerId ?? "unknown";
+        var shortOwner = owner.Length > 12 ? owner.Substring(0, 12) : owner;
+        return BoundIndustrialDisplayName("Independent " + shortOwner, "Independent");
+    }
+
+    private static string BoundIndustrialDisplayName(string? value, string fallback)
+    {
+        var safe = new string((value ?? "").Where(character => !char.IsControl(character)).ToArray()).Trim();
+        if (safe.Length == 0) safe = fallback;
+        return safe.Length <= 56 ? safe : safe.Substring(0, 53) + "...";
     }
 
     private static string BuildRemoteDispatchState(string transportIdentity)
@@ -3010,7 +3118,7 @@ public static class Main
         var payload = new
         {
             schema = "bdvm.remote-dispatch", schemaVersion = 2, release = "0.3.0-beta", transportIdentity, authorityActor = playerId,
-            supportedIntents = new[] { "fleet.set-tag", "fleet.set-dispatch-state", "fleet.set-state", "fleet.rename", "fleet.bundle", "fleet.resale", "fleet.maintenance", "company.create", "company.apply", "company.invite", "company.decide-application", "company.respond-invitation", "company.leave", "company.policy", "company.permission", "company.transfer-leadership", "company.dissolve", "wallet.transfer", "market.configure", "market.generate-order", "market.purchase", "initial-delivery.place", "initial-delivery.reconcile", "assignment.cancel", "assignment.manage", "finance.manage", "yard.manage", "industry.manage" },
+            supportedIntents = new[] { "fleet.set-tag", "fleet.set-dispatch-state", "fleet.set-state", "fleet.rename", "fleet.transfer", "fleet.bundle", "fleet.resale", "fleet.maintenance", "company.create", "company.apply", "company.invite", "company.decide-application", "company.respond-invitation", "company.leave", "company.policy", "company.permission", "company.transfer-leadership", "company.dissolve", "wallet.transfer", "market.configure", "market.generate-order", "market.purchase", "initial-delivery.place", "initial-delivery.reconcile", "assignment.cancel", "assignment.manage", "finance.manage", "yard.manage", "industry.manage" },
             wallets = snapshot.Economy.Wallets.Where(x => visibility.CanView(x.Account)).Select(x => new { account = x.Account.Key, x.Balance, x.Version }),
             walletMirror = snapshot.Economy.ExternalWalletMirrors.Where(x => visibility.IsPlayer(x.PlayerId)).Select(x => new { x.PlayerId, x.LastSynchronizedBalance, x.LastOperationId, x.Version }),
             companies = snapshot.Economy.Companies.Select(x => new { x.CompanyId, x.Name, x.LeaderId, members = visibility.IsCompany(x.CompanyId) ? x.Members.ToArray() : Array.Empty<string>(), delegatedPermissions = visibility.IsCompany(x.CompanyId) ? x.DelegatedPermissions.ToDictionary(p => p.Key, p => p.Value.Select(v => v.ToString()).ToArray()) : new Dictionary<string, string[]>(), x.MembershipPolicy, x.Liquidating, x.Version }),
@@ -3028,7 +3136,7 @@ public static class Main
             operatingCosts = snapshot.OperatingCosts.Where(x => visibility.IsPlayer(x.RequesterId) || visibility.CanView(x.Payer)).Select(x => new { x.SessionId, x.AssetId, action = x.Action.ToString(), payer = x.Payer.Key, state = x.State.ToString(), x.MaximumAuthorizedCost, x.ReservedAmount, x.ActualCost, x.SubsidizedExcess, x.ConditionBefore, x.ConditionAfter, settlement = x.ExternalSettlement.ToString(), x.ResultCode }),
             assignments = snapshot.Assignments.Where(x => visibleAssignmentIds.Contains(x.AssignmentId, StringComparer.Ordinal)).Select(x => new { x.AssignmentId, x.MissionId, kind = x.Kind.ToString(), state = x.State.ToString(), x.AssetIds, operatorRef = x.Operator.Key, x.ActualRevenue, settlement = x.ExternalSettlement.ToString(), x.Version }),
             missionChoices = missionChoices.Select(x => new { x.MissionId, displayName = x.Kind + " job — " + x.MissionId + " (" + x.State + ")", x.Kind, x.State }),
-            industrial = new { enabled = runtimeSettings.EnableIndustrialPilot, sites = industrialSites, routes = industrialRoutes, compatibleWagonsByCargo, pilotPersonalWagons = ControllableIndustrialPilotWagonIds(snapshot, playerId, false), pilotCompanyWagons = ControllableIndustrialPilotWagonIds(snapshot, playerId, true), stocks = snapshot.IndustrialStocks.Select(x => new { x.FacilityId, x.CargoId, role = StockRole(x.FacilityId, x.CargoId), x.OnHand, x.Capacity, fillRatio = x.Capacity <= 0m ? 0m : x.OnHand / x.Capacity, inTransit = x.ReservedInbound, currentUnitValue = UnitValue(x.FacilityId, x.CargoId, false), previousUnitValue = UnitValue(x.FacilityId, x.CargoId, true), trend = UnitValue(x.FacilityId, x.CargoId, false).CompareTo(UnitValue(x.FacilityId, x.CargoId, true)), productionState = ProductionState(x.FacilityId, x.CargoId, x.OnHand, x.Capacity), x.Version }), recipes = snapshot.IndustrialRecipes.Select(x => new { x.RecipeId, x.FacilityId, kind = string.IsNullOrWhiteSpace(x.InputCargoId) ? "Source" : string.IsNullOrWhiteSpace(x.OutputCargoId) ? "Sink" : "Transformer", x.InputCargoId, x.InputQuantity, x.OutputCargoId, x.OutputQuantity, x.CadenceTicks, x.CompletedCycles, x.LastProductionTick, x.Version }), policies = snapshot.IndustrialTransportPolicies.Select(x => new { x.PolicyId, x.OriginFacilityId, x.DestinationFacilityId, x.CargoId, x.BatchQuantity, x.DestinationTargetQuantity, x.Enabled, x.Version }), needs = liveIndustrialNeeds.Select(x => new { x.NeedId, x.PolicyId, x.OriginFacilityId, x.DestinationFacilityId, x.CargoId, x.Quantity, currentUnitValue = x.Quantity <= 0m ? 0 : decimal.ToInt64(decimal.Floor((x.BaseReward + x.ScarcityBonus) / x.Quantity)), x.SourceFillRatio, x.DestinationFillRatio, requirement = x.WagonRequirement, state = "LiveStock", x.Version }), cargoTags = snapshot.IndustrialCargoTags.Where(x => visibleAssetIds.Contains(x.AssetId, StringComparer.Ordinal)).Select(x => new { x.AssetId, x.CargoId, lifetime = x.Lifetime.ToString(), x.DossierId, x.Version }), contracts = snapshot.IndustrialContracts.Where(x => x.StockDriven && visibility.CanView(x.Beneficiary)).Select(x => new { dossierId = x.ContractId, x.ContractId, x.OriginFacilityId, x.DestinationFacilityId, x.CargoId, x.Quantity, x.DeliveredQuantity, x.PaidAmount, x.QuotedUnitValue, cargoTagLifetime = x.CargoTagLifetime.ToString(), stockDriven = true, assignedWagons = x.AssignedWagons.Select(w => new { w.AssetId, w.DefinitionId, w.Capacity, w.LeaseId }), manifests = x.Manifests.Select(m => new { m.AssetId, m.LoadedQuantity, m.UnloadedQuantity, onBoardQuantity = m.OnBoardQuantity }), state = x.State.ToString(), x.Version }) },
+            industrial = new { enabled = runtimeSettings.EnableIndustrialPilot, sites = industrialSites, routes = industrialRoutes, compatibleWagonsByCargo, pilotPersonalWagons = ControllableIndustrialPilotWagonIds(snapshot, playerId, false), pilotCompanyWagons = ControllableIndustrialPilotWagonIds(snapshot, playerId, true), stocks = snapshot.IndustrialStocks.Select(x => new { x.FacilityId, x.CargoId, role = StockRole(x.FacilityId, x.CargoId), x.OnHand, x.Capacity, fillRatio = x.Capacity <= 0m ? 0m : x.OnHand / x.Capacity, inTransit = x.ReservedInbound, currentUnitValue = UnitValue(x.FacilityId, x.CargoId, false), previousUnitValue = UnitValue(x.FacilityId, x.CargoId, true), trend = UnitValue(x.FacilityId, x.CargoId, false).CompareTo(UnitValue(x.FacilityId, x.CargoId, true)), productionState = ProductionState(x.FacilityId, x.CargoId, x.OnHand, x.Capacity), x.Version }), recipes = snapshot.IndustrialRecipes.Select(x => new { x.RecipeId, x.FacilityId, kind = string.IsNullOrWhiteSpace(x.InputCargoId) ? "Source" : string.IsNullOrWhiteSpace(x.OutputCargoId) ? "Sink" : "Transformer", x.InputCargoId, x.InputQuantity, x.OutputCargoId, x.OutputQuantity, x.CadenceTicks, x.CompletedCycles, x.LastProductionTick, x.Version }), policies = snapshot.IndustrialTransportPolicies.Select(x => new { x.PolicyId, x.OriginFacilityId, x.DestinationFacilityId, x.CargoId, x.BatchQuantity, x.DestinationTargetQuantity, x.Enabled, x.Version }), needs = liveIndustrialNeeds.Select(x => new { x.NeedId, x.PolicyId, x.OriginFacilityId, x.DestinationFacilityId, x.CargoId, x.Quantity, currentUnitValue = x.Quantity <= 0m ? 0 : decimal.ToInt64(decimal.Floor((x.BaseReward + x.ScarcityBonus) / x.Quantity)), x.SourceFillRatio, x.DestinationFillRatio, requirement = x.WagonRequirement, state = "LiveStock", x.Version }), cargoTags = snapshot.IndustrialCargoTags.Where(x => visibleAssetIds.Contains(x.AssetId, StringComparer.Ordinal)).Select(x => new { x.AssetId, x.CargoId, lifetime = x.Lifetime.ToString(), x.DossierId, x.Version }), contracts = snapshot.IndustrialContracts.Where(x => x.StockDriven && visibility.CanView(x.Beneficiary)).Select(x => new { displayName = IndustrialContractDisplayName(snapshot, x), dossierId = x.ContractId, x.ContractId, x.OriginFacilityId, x.DestinationFacilityId, x.CargoId, x.Quantity, x.DeliveredQuantity, x.PaidAmount, x.QuotedUnitValue, cargoTagLifetime = x.CargoTagLifetime.ToString(), stockDriven = true, assignedWagons = x.AssignedWagons.Select(w => new { w.AssetId, w.DefinitionId, w.Capacity, w.LeaseId }), manifests = x.Manifests.Select(m => new { m.AssetId, m.LoadedQuantity, m.UnloadedQuantity, onBoardQuantity = m.OnBoardQuantity }), state = x.State.ToString(), x.Version }) },
             passengers = new { enabled = runtimeSettings.EnablePassengerEconomy, routes = snapshot.PassengerRoutes.Select(x => new { routeName = FriendlyLocationName(x.OriginId) + " → " + FriendlyLocationName(x.DestinationId), x.RouteId, originName = FriendlyLocationName(x.OriginId), x.OriginId, destinationName = FriendlyLocationName(x.DestinationId), x.DestinationId, x.DemandUnits, x.MaximumDemandUnits, x.DemandPerInterval, x.DesiredFrequencyTicks, x.BaseFarePerPassenger, x.LatePenaltyPerTick, x.PunctualityBasisPoints, x.Version }), contracts = snapshot.PassengerContracts.Where(x => visibleAssignmentIds.Contains(x.AssignmentId, StringComparer.Ordinal)).Select(x => new { serviceName = "Passenger service " + x.PassengerJobId, x.ContractId, x.RouteId, x.PassengerJobId, x.AssignmentId, x.AssetIds, operatorRef = x.Operator.Key, x.Capacity, x.BookedPassengers, x.MaximumQuotedRevenue, x.ObservedVanillaRevenue, x.PunctualityPenalty, x.PaidRevenue, state = x.State.ToString(), x.Version }) },
             dynamicEconomy = new { enabled = runtimeSettings.EnableDynamicEconomy, metrics = snapshot.DynamicEconomy.Metrics.Select(x => new { x.CategoryId, x.SupplyRatio, x.DemandRatio, x.UtilizationRatio, x.LessorAvailabilityRatio, x.RawFactor, x.SmoothedFactor, x.CalculatedTick, x.Version }), profitability = snapshot.DynamicEconomy.Profitability.Where(x => visibleAssetIds.Contains(x.AssetId, StringComparer.Ordinal)).Select(x => new { x.AssetId, x.OperatingRevenue, x.OperatingCosts, x.NetOperatingResult, x.AcquisitionCash, x.CompletedServices, x.Version }) },
             assetLifecycle = new { enabled = runtimeSettings.EnableAssetLifecycle, cleanupProtectionAdapter = "CarVisitChecker.IsRecentlyVisited-exact-CarGUID-host-only", records = snapshot.AssetLifecycle.Records.Where(x => visibleAssetIds.Contains(x.AssetId, StringComparer.Ordinal)).Select(x => new { x.AssetId, status = x.Status.ToString(), protection = x.ProtectionStatus.ToString(), x.LastKnownMapRevision, x.LastKnownTrackId, x.Detail, x.Version }) },
@@ -3465,10 +3573,20 @@ public static class Main
             var assetId = (string?)body["assetId"] ?? ""; var displayName = (string?)body["displayName"] ?? "";
             var record = runtimeStateProvider!.ManageFleetFor("remote-fleet-rename:" + correlation, actorId, assetId, FleetCommandAction.Rename, runtimeRoleDetector!, displayName: displayName); result = new { action, record.Outcome, record.ResultCode, record.AssetId, record.FleetVersionAfter };
         }
+        else if (action == "fleet.transfer")
+        {
+            var assetId = (string?)body["assetId"] ?? "";
+            var snapshot = runtimeStateProvider!.Current!;
+            var player = snapshot.Economy.Players.Single(value => value.PlayerId == actorId);
+            var companyId = player.CompanyId ?? throw new InvalidOperationException("Company membership is required.");
+            var record = runtimeStateProvider.ManageFleetFor("remote-fleet-transfer:" + correlation, actorId, assetId,
+                FleetCommandAction.TransferOwnership, runtimeRoleDetector!, target: AssetOwnerRef.Company(companyId));
+            result = new { action, record.Outcome, record.ResultCode, record.AssetId, record.FleetVersionAfter, target = AssetOwnerRef.Company(companyId).Key };
+        }
         else if (action == "company.create")
         {
             var name = (string?)body["name"] ?? "";
-            var record = runtimeStateProvider!.CreateCompanyFor("remote-company-create:" + correlation, actorId, name); result = new { action, record.State, record.ResultCode, record.CompanyId };
+            var record = runtimeStateProvider!.CreateCompanyFor("remote-company-create:" + correlation, actorId, name); RequireSuccessfulCompanyCommand(record); result = new { action, record.State, record.ResultCode, record.CompanyId };
         }
         else if (action == "company.apply")
         {
@@ -3650,7 +3768,10 @@ public static class Main
         {
             var grantId = (string?)body["grantId"] ?? ""; var trackId = (string?)body["trackId"] ?? ""; if (!Enum.TryParse((string?)body["targetKind"], true, out InitialDeliveryTargetKind targetKind)) throw new ArgumentException("Invalid initial delivery target kind.");
             var snapshot = runtimeStateProvider!.Current!;
-            var record = runtimeStateProvider.PlaceInitialDeliveryFor("remote-initial-delivery:" + correlation, actorId, grantId, trackId, targetKind, runtimeRoleDetector!, new UnityInitialDeliveryAdapter(LeaseReturnTrackRules(snapshot), snapshot: snapshot), new SaveGameInitialDeliveryCheckpointPort(mod!)); result = new { action, record.State, record.ResultCode, record.GrantId, record.AssetIds, record.TargetTrackId };
+            var grant = snapshot.InitialDeliveries.Single(x => x.GrantId == grantId);
+            var adapter = new UnityInitialDeliveryAdapter(LeaseReturnTrackRules(snapshot), snapshot: snapshot);
+            var record = QueueInitialDelivery(mod!, actorId, "remote-initial-delivery:" + correlation, grant, new InitialDeliveryTrackRule { TrackId = trackId, Kind = targetKind }, adapter);
+            result = new { action, record.State, record.ResultCode, record.GrantId, record.AssetIds, record.TargetTrackId };
         }
         else if (action == "initial-delivery.reconcile")
         {
@@ -4061,6 +4182,7 @@ public static class Main
                 }
                 var contract = engine.StartStockTransport("remote-industry-stock-start:" + correlation, localPlayer.PlayerId, policyId,
                     (decimal?)body["quantity"] ?? 0m, beneficiary, operatorRef, ids, tick, onboard);
+                StampIndustrialContractCreator(snapshot, contract, transportIdentity);
                 try
                 {
                     EnsureSelfShuntIndustrialLifecycle(mod ?? throw new InvalidOperationException("BDVM mod entry is unavailable."));
@@ -4082,6 +4204,7 @@ public static class Main
                 var need = snapshot.IndustrialTransportNeeds.Single(value => value.NeedId == needId);
                 var penaltyPayer = need.PreparationPenalty > 0 ? beneficiary : null;
                 var contract = engine.AcceptTransportNeed("remote-industry-need-accept:" + correlation, needId, needVersion, beneficiary, penaltyPayer, tick);
+                StampIndustrialContractCreator(snapshot, contract, transportIdentity);
                 result = new { action, operation, needId, contract.ContractId, state = contract.State.ToString(), contract.Version };
             }
             else if (operation == "create")
@@ -4095,6 +4218,7 @@ public static class Main
                     (string?)body["originFacilityId"] ?? "", (string?)body["destinationFacilityId"] ?? "", cargoId, (decimal?)body["quantity"] ?? 0m,
                     beneficiary, (long?)body["baseReward"] ?? 0, (long?)body["scarcityBonus"] ?? 0, tick, (long?)body["deadlineTick"] ?? 0,
                     requirement, (long?)body["preparationPenalty"] ?? 0);
+                StampIndustrialContractCreator(snapshot, contract, transportIdentity);
                 result = new { action, operation, contract.ContractId, state = contract.State.ToString(), contract.Version };
             }
             else if (operation == "advance-production")
@@ -4147,7 +4271,7 @@ public static class Main
 
     private static bool IsActorAwareRemoteAction(string action)
     {
-        return action == "fleet.set-tag" || action == "fleet.set-dispatch-state" || action == "fleet.set-state" || action == "fleet.rename" || action == "fleet.bundle" || action == "fleet.resale" || action == "market.purchase" ||
+        return action == "fleet.set-tag" || action == "fleet.set-dispatch-state" || action == "fleet.set-state" || action == "fleet.rename" || action == "fleet.transfer" || action == "fleet.bundle" || action == "fleet.resale" || action == "market.purchase" ||
             action == "company.create" || action == "company.apply" || action == "company.invite" ||
             action == "company.decide-application" || action == "company.respond-invitation" ||
             action == "company.leave" || action == "company.policy" || action == "company.permission" ||
