@@ -40,11 +40,48 @@ public sealed class UnityWagonCompatibilityPort : IWagonCompatibilityPort
 {
     private readonly VehicleAcquisitionSnapshot snapshot;
     public UnityWagonCompatibilityPort(VehicleAcquisitionSnapshot snapshot) => this.snapshot = snapshot ?? throw new ArgumentNullException(nameof(snapshot));
+    private Dictionary<string, TrainCar?>? capturedCars;
+    private Dictionary<string, CargoType_v2>? capturedCargos;
+    private HashSet<string>? ambiguousCargos;
+    private Dictionary<(string, string, string), WagonCompatibility>? capturedResults;
+
+    // Lifetime is exactly one synchronous read-only projection. Command ports
+    // retain the uncached constructor and always resolve the current world.
+    public static UnityWagonCompatibilityPort ForReadOnlySnapshot(VehicleAcquisitionSnapshot snapshot)
+    {
+        var port = new UnityWagonCompatibilityPort(snapshot);
+        port.capturedCars = snapshot.Assets.Assets.ToDictionary(asset => asset.AssetId, asset =>
+            asset.GameLink.State == PersistentLinkState.Resolved && !string.IsNullOrWhiteSpace(asset.GameLink.Value)
+                ? TrainCarRegistry.Instance?.GetTrainCarByCarGuid(asset.GameLink.Value) : null, StringComparer.Ordinal);
+        port.capturedCargos = new Dictionary<string, CargoType_v2>(StringComparer.OrdinalIgnoreCase);
+        port.ambiguousCargos = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var cargo in Globals.G.Types.cargos.Where(value => value != null))
+            foreach (var id in new[] { cargo.id, cargo.v1.ToString() }.Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                if (port.capturedCargos.TryGetValue(id, out var existing) && existing != cargo)
+                    port.ambiguousCargos.Add(id);
+                else port.capturedCargos[id] = cargo;
+            }
+        port.capturedResults = new Dictionary<(string, string, string), WagonCompatibility>();
+        return port;
+    }
 
     public WagonCompatibility Inspect(string assetId, string definitionId, string cargoId)
     {
-        var car = UnityRollingStockResolver.Resolve(snapshot, assetId);
-        var cargo = UnityRollingStockResolver.ResolveCargo(cargoId);
+        var key = (assetId, definitionId, cargoId);
+        if (capturedResults != null && capturedResults.TryGetValue(key, out var result)) return result;
+        result = InspectCurrent(assetId, definitionId, cargoId);
+        if (capturedResults != null) capturedResults[key] = result;
+        return result;
+    }
+
+    private WagonCompatibility InspectCurrent(string assetId, string definitionId, string cargoId)
+    {
+        if (ambiguousCargos?.Contains(cargoId) == true) throw new InvalidOperationException("Ambiguous cargo identity: " + cargoId);
+        var car = capturedCars == null ? UnityRollingStockResolver.Resolve(snapshot, assetId)
+            : capturedCars.TryGetValue(assetId, out var foundCar) ? foundCar : null;
+        var cargo = capturedCargos == null ? UnityRollingStockResolver.ResolveCargo(cargoId)
+            : capturedCargos.TryGetValue(cargoId, out var foundCargo) ? foundCargo : null;
         if (car == null || car.logicCar == null) return Refused("persistent-wagon-not-present");
         if (!string.Equals(car.carLivery?.id, definitionId, StringComparison.Ordinal)) return Refused("definition-mismatch");
         if (cargo == null || DVObjectModel.current?.CargoToLoadableCarTypes == null ||

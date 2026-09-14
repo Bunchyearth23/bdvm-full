@@ -87,10 +87,12 @@ internal static class UnityIndustrialJobAdapter
         var destinationStation = ResolveStation(contract.DestinationFacilityId) ?? throw new InvalidOperationException("The destination facility is not a loaded station: " + contract.DestinationFacilityId + ".");
         var trainCars = ResolveAssignedCars(snapshot, contract);
         var cars = trainCars.Select(value => value.logicCar ?? throw new InvalidOperationException("An assigned wagon has no logic car.")).ToList();
-        var source = WarehouseMachineController.allControllers.FirstOrDefault(value => value != null && value.warehouseMachine != null &&
-            StationFor(value.warehouseMachine.WarehouseTrack) == sourceStation && value.warehouseMachine.SupportedCargoTypes.Contains(cargo) &&
-            cars.All(car => car.CurrentTrack == value.warehouseMachine.WarehouseTrack));
-        if (source == null) throw new InvalidOperationException("Place every assigned wagon fully on one compatible loading track at " + contract.OriginFacilityId + ".");
+        var source = WarehouseMachineController.allControllers.Where(value => value != null && value.warehouseMachine != null &&
+            StationFor(value.warehouseMachine.WarehouseTrack) == sourceStation && value.warehouseMachine.SupportedCargoTypes.Contains(cargo))
+            .OrderByDescending(value => cars.All(car => car.CurrentTrack == value.warehouseMachine.WarehouseTrack)).FirstOrDefault();
+        // Creating a dossier assigns work. The warehouse enforces physical placement
+        // when loading actually starts; already adopted cargo needs no new loading.
+        if (source == null) throw new InvalidOperationException("No compatible loading track exists at " + contract.OriginFacilityId + ".");
         var destination = WarehouseMachineController.allControllers.FirstOrDefault(value => value != null && value.warehouseMachine != null &&
             StationFor(value.warehouseMachine.WarehouseTrack) == destinationStation && value.warehouseMachine.SupportedCargoTypes.Contains(cargo));
         if (destination == null) throw new InvalidOperationException("No compatible unloading track exists at " + contract.DestinationFacilityId + ".");

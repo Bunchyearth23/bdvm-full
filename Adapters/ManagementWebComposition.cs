@@ -23,6 +23,12 @@ internal sealed class RuntimeManagementPort : IManagementAuthoritativePort
     public ManagementWebSnapshot ReadSnapshot(string authenticatedPrincipal, string correlationId)
     {
         var source = JObject.Parse(snapshot(authenticatedPrincipal));
+        return ProjectSnapshot(source, correlationId);
+    }
+
+    // Pure projection. The asynchronous transport supplies an owned source tree.
+    internal static ManagementWebSnapshot ProjectSnapshot(JObject source, string correlationId)
+    {
         var view = new ManagementWebSnapshot
         {
             Version = HighestVersion(source), CorrelationId = correlationId, FeatureFlags = Features(source),
@@ -34,6 +40,16 @@ internal sealed class RuntimeManagementPort : IManagementAuthoritativePort
             YardPlans = Rows(source["triageAssistance"]?["plans"]),
             Industry = Rows(source["industrial"]?["stocks"], source["industrial"]?["recipes"], source["industrial"]?["policies"], source["industrial"]?["needs"], source["industrial"]?["contracts"]),
             Contracts = Rows(source["assignments"], source["industrial"]?["contracts"], source["passengers"]?["contracts"]),
+            // This source is already detached and filtered for the authenticated actor.
+            IndustrialWorkspace = new Dictionary<string, object> {
+                ["enabled"] = (bool?)source["industrial"]?["enabled"] ?? false,
+                ["routes"] = Rows(source["industrial"]?["routes"]),
+                ["contracts"] = Rows(source["industrial"]?["contracts"]),
+                ["wagons"] = Rows(source["fleet"]), ["tags"] = Rows(source["rollingStockTags"]),
+                ["locations"] = Rows(source["locationChoices"]), ["cargoChoices"] = Rows(source["cargoChoices"]),
+                ["personalWagons"] = source["industrial"]?["pilotPersonalWagons"]?.ToObject<string[]>() ?? Array.Empty<string>(),
+                ["companyWagons"] = source["industrial"]?["pilotCompanyWagons"]?.ToObject<string[]>() ?? Array.Empty<string>()
+            },
             Passengers = Rows(source["passengers"]?["routes"], source["passengers"]?["contracts"]),
             Maintenance = Rows(source["operatingCosts"]),
             Diagnostics = DiagnosticRows(source),

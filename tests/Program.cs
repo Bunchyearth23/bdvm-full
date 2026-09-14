@@ -6,6 +6,7 @@ internal static class Program
 {
     static int Main()
     {
+        SnapshotChecks.Run();
         var port = new RuntimeManagementPort(_ => @"{
           'authorityActor':'local-player',
           'companies':[{'companyId':'co','name':'Rail Company','leaderId':'local-player','members':['local-player']}],
@@ -34,7 +35,21 @@ internal static class Program
         }", (_, __) => "{}").ReadSnapshot("independent", "join");
         Require(independent.Actions.Any(a => a.Label == "Create a company" && a.Fields.Any(f => f.Name == "name")), "Independent players must be able to create a company.");
         Require(independent.Actions.Any(a => a.Label == "Request to join Open Railway" && (string)a.Payload["companyId"] == "open-co"), "Independent players must be able to request company membership.");
-        Require(!view.Actions.Any(a => a.Area == "industry" && a.Label.StartsWith("Run stock transport")), "Transport dossier creation belongs to Dispatch, not the Industry information view.");
+        Require(!view.Actions.Any(a => a.Area == "industry" && a.Label.StartsWith("Run stock transport")), "Transport dossier creation belongs to Contracts, not the Industry information view.");
+        var dossierSource = Newtonsoft.Json.Linq.JObject.Parse(@"{
+          'industrial':{'enabled':true,'routes':[{'originFacilityId':'SM','destinationFacilityId':'GF','cargoIds':['Steel']}],
+            'contracts':[{'dossierId':'one','quantity':3,'assignedWagons':[{'assetId':'wagon'}]}],
+            'pilotPersonalWagons':['wagon'],'pilotCompanyWagons':[]},
+          'fleet':[{'assetId':'wagon','carGuid':'exact-guid','kind':'FreightWagon','state':'Available'}],
+          'rollingStockTags':[{'assetId':'wagon','sourceFacilityId':'SM','cargoId':'Steel','loadedCargoAmount':1,'capacity':1}]
+        }");
+        var projected = RuntimeManagementPort.ProjectSnapshot(dossierSource, "dossiers");
+        var workspace = Newtonsoft.Json.Linq.JObject.FromObject(projected.IndustrialWorkspace);
+        Require((bool)workspace["enabled"]! && (string)workspace["wagons"]![0]!["carGuid"]! == "exact-guid", "Contracts preserve exact physical wagon identities.");
+        Require((decimal)workspace["tags"]![0]!["loadedCargoAmount"]! == 1m && workspace["contracts"]!.Count() == 1, "Contracts expose preloaded cargo and independent dossiers.");
+        Require(workspace["personalWagons"]!.Count() == 1 && workspace["companyWagons"]!.Count() == 0, "Operator eligibility remains host-provided.");
+        dossierSource["rollingStockTags"]![0]!["loadedCargoAmount"] = 0;
+        Require((decimal)Newtonsoft.Json.Linq.JObject.FromObject(projected.IndustrialWorkspace)["tags"]![0]!["loadedCargoAmount"]! == 1m, "Contracts workspace owns its data after projection.");
         Require(!view.Actions.Any(a => a.Area == "industry" && (a.Label.Contains("Reserve transport") || a.Label.StartsWith("Publish need") || a.Label.StartsWith("Accept "))), "Stock-driven industry must expose no offer publication, acceptance or reservation action.");
         Require(view.Actions.Any(a => a.Label.StartsWith("Reconcile physical delivery") && (string)a.Payload["grantId"] == "grant-reconcile" && (string)a.Payload["action"] == "initial-delivery.reconcile"), "A pending physical delivery must expose its dedicated reconciliation action.");
         var steelMill = view.Industry.Single(row => (string)row["site"] == "Steel Mill");
@@ -44,7 +59,7 @@ internal static class Program
         Require(((string[])steelMill["supportedCargo"]).Contains("Steel") && ((string[])steelMill["supportedCargo"]).Contains("Ore"), "Every warehouse-compatible cargo must remain visible without being misrepresented as an input or output.");
         Require(((string[])factory["stocks"]).Single().Contains("Not tracked"), "A loaded warehouse without BDVM configuration must still be visible.");
         Require(view.Actions.Where(a => a.Area == "industry").SelectMany(a => a.Fields).Where(f => f.Name == "allowedDefinitionIds").All(f => f.Options.SequenceEqual(new[] { "FlatbedEmpty" })), "Locomotives must never be offered as freight wagons.");
-        Console.WriteLine("Management presentation: 17/17 passed"); return 0;
+        Console.WriteLine("Management presentation: 21/21 passed"); return 0;
     }
     static void Require(bool condition, string message) { if (!condition) throw new Exception(message); }
 }

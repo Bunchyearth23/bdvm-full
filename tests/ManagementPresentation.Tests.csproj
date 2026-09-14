@@ -1,6 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net48</TargetFramework><LangVersion>latest</LangVersion><Nullable>enable</Nullable></PropertyGroup>
   <ItemGroup>
+    <Compile Include="..\Adapters\DetachedWebSnapshot.cs" Link="DetachedWebSnapshot.cs" />
+    <Compile Include="..\Adapters\SnapshotWorker.cs" Link="SnapshotWorker.cs" />
     <Compile Include="..\Adapters\ManagementWebComposition.cs" Link="ManagementWebComposition.cs" />
     <Compile Include="..\Adapters\CanonicalIndustryFlows.cs" Link="CanonicalIndustryFlows.cs" />
     <ProjectReference Include="..\..\BDVM.Management\BDVM.Management.csproj" />

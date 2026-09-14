@@ -18,9 +18,12 @@ internal static class UnityReadOnlyProjection
             .Distinct(StringComparer.Ordinal).OrderBy(name => name, StringComparer.Ordinal).ToArray();
 
     public static OriginRecord Origin(object? source, GameObject? prefab)
+        => OriginFromComponents(source, Components(prefab));
+
+    public static OriginRecord OriginFromComponents(object? source, string[] components)
     {
         var assembly = source?.GetType().Assembly.GetName().Name;
-        var customComponents = Components(prefab).Where(name =>
+        var customComponents = components.Where(name =>
             !name.StartsWith("UnityEngine.", StringComparison.Ordinal) &&
             !name.StartsWith("DV.", StringComparison.Ordinal) &&
             name != "TrainCar").ToArray();
@@ -43,12 +46,13 @@ public sealed class UnityVehicleDefinitionReader : IVehicleDefinitionReader
         {
             var id = livery?.id;
             var prefab = livery?.prefab;
+            var components = UnityReadOnlyProjection.Components(prefab);
             return new VehicleDefinitionRecord
             {
                 ExistingDefinitionId = id,
                 Type = livery?.parentType?.id,
-                Origin = UnityReadOnlyProjection.Origin(livery, prefab),
-                Components = UnityReadOnlyProjection.Components(prefab),
+                Origin = UnityReadOnlyProjection.OriginFromComponents(livery, components),
+                Components = components,
                 Resolution = string.IsNullOrWhiteSpace(id) ? ResolutionState.MissingIdentifier :
                     prefab == null ? ResolutionState.MissingDefinition : ResolutionState.Resolved,
                 ResolutionDetail = prefab == null ? "Loaded livery has no prefab." : null

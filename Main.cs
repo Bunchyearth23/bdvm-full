@@ -1,9 +1,13 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Threading;
+using System.Threading.Tasks;
 using BDVM.Adapters;
 using BDVM.Domain;
 using BDVM.Management;
@@ -24,6 +28,102 @@ namespace BDVM;
 
 public static class Main
 {
+    private static class RuntimePerformance
+    {
+        private sealed class Sample
+        {
+            public long Calls;
+            public long TotalTicks;
+            public long MaximumTicks;
+            public long PayloadBytes;
+            public readonly long[] RecentTicks = new long[256];
+        }
+
+        private static readonly object gate = new object();
+        private static readonly Dictionary<string, Sample> samples = new Dictionary<string, Sample>(StringComparer.Ordinal);
+        private static long nextReportTicks;
+
+        public static long Start() => Stopwatch.GetTimestamp();
+
+        public static void Record(string name, long startedAt, long payloadBytes = 0)
+        {
+            var elapsed = Stopwatch.GetTimestamp() - startedAt;
+            lock (gate)
+            {
+                if (!samples.TryGetValue(name, out var sample)) samples[name] = sample = new Sample();
+                sample.Calls++;
+                sample.TotalTicks += elapsed;
+                sample.MaximumTicks = Math.Max(sample.MaximumTicks, elapsed);
+                sample.PayloadBytes += Math.Max(0, payloadBytes);
+                sample.RecentTicks[(int)((sample.Calls - 1) % sample.RecentTicks.Length)] = elapsed;
+            }
+        }
+
+        public static void Report(UnityModManager.ModEntry entry)
+        {
+            var now = Stopwatch.GetTimestamp();
+            Dictionary<string, Sample>? report = null;
+            lock (gate)
+            {
+                if (nextReportTicks != 0 && now < nextReportTicks) return;
+                nextReportTicks = now + Stopwatch.Frequency * 10;
+                report = new Dictionary<string, Sample>(samples, StringComparer.Ordinal);
+                samples.Clear();
+            }
+            foreach (var pair in report)
+            {
+                var sample = pair.Value;
+                var totalMs = sample.TotalTicks * 1000d / Stopwatch.Frequency;
+                var maxMs = sample.MaximumTicks * 1000d / Stopwatch.Frequency;
+                var recent = sample.RecentTicks.Take((int)Math.Min(sample.Calls, sample.RecentTicks.Length)).OrderBy(value => value).ToArray();
+                string Quantile(double percentile) => (recent[Math.Max(0, (int)Math.Ceiling(recent.Length * percentile) - 1)] * 1000d / Stopwatch.Frequency).ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
+                entry.Logger.Log("[correlation=runtime-performance] [event=runtime-performance] name=" + pair.Key + ", calls=" + sample.Calls + ", totalMs=" + totalMs.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + ", maxMs=" + maxMs.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + ", p50Ms=" + Quantile(0.50) + ", p95Ms=" + Quantile(0.95) + ", p99Ms=" + Quantile(0.99) + ", quantileSamples=" + recent.Length + ", payloadBytes=" + sample.PayloadBytes);
+            }
+            entry.Logger.Log("[correlation=runtime-performance] [event=runtime-memory] gen0=" + GC.CollectionCount(0) + ", gen1=" + GC.CollectionCount(1) + ", gen2=" + GC.CollectionCount(2) + ", managedBytes=" + GC.GetTotalMemory(false));
+        }
+    }
+
+    private sealed class FixedNetworkRoleDetector : INetworkRoleDetector
+    {
+        private readonly NetworkRoleReport report;
+
+        public FixedNetworkRoleDetector(NetworkRoleReport source)
+        {
+            report = new NetworkRoleReport { Role = source.Role, HasAuthority = source.HasAuthority, Detail = source.Detail };
+        }
+
+        public NetworkRoleReport Detect()
+            => new NetworkRoleReport { Role = report.Role, HasAuthority = report.HasAuthority, Detail = report.Detail };
+    }
+
+    private sealed class EconomicTickWork
+    {
+        public PeriodicEconomicDelta? Delta { get; set; }
+        public string? JournalEvent { get; set; }
+        public string Correlation { get; set; } = "";
+        public long ExpectedRevision { get; set; }
+        public long MutationVersion { get; set; }
+        public long ActiveTicks { get; set; }
+        public long SkippedTicks { get; set; }
+        public long Tick { get; set; }
+        public long PersonalDelta { get; set; }
+        public Exception? Failure { get; set; }
+    }
+
+    private sealed class EconomicTickRequest
+    {
+        public DetachedRuntimeState? Captured { get; set; }
+        public long ExpectedRevision { get; set; }
+        public long ExpectedTick { get; set; }
+        public NetworkRoleReport Authority { get; set; } = null!;
+        public LeaseClockAdvance Advance { get; set; } = null!;
+        public bool IndustrialPilot { get; set; }
+        public string Correlation { get; set; } = "";
+        public long Generation { get; set; }
+        public CancellationToken Cancellation { get; set; }
+        public long MutationVersion { get; set; }
+    }
+
     private static UnityModManager.ModEntry? mod;
     private static DiagnosticService? diagnostic;
     private static string status = "Ready. No diagnostic has been run.";
@@ -32,6 +132,8 @@ public static class Main
     private static Harmony? saveHarmony;
     private static NetworkRoleDetector? runtimeRoleDetector;
     private static AcquisitionRuntimeStateProvider? runtimeStateProvider;
+    private static long economicProjectionRevision = -1;
+    private static long economicProjectionMutationVersion = -1;
     private static int returnedLeaseCleanupFrames;
     private static RuntimeSaveSettings runtimeSettings = RuntimeSaveSettings.SafeDefaults();
     private static readonly Newtonsoft.Json.JsonSerializerSettings webJsonSettings = new Newtonsoft.Json.JsonSerializerSettings
@@ -165,8 +267,16 @@ public static class Main
     private static int walletSyncFrames;
     private static int populationControlRetryFrames;
     private static double economicClockAccumulator;
-    private static long economicTicksSinceSave;
     private static double pendingTimeSkipTicks;
+    private static System.Threading.Tasks.Task? economicWorkerLoop;
+    private static CancellationTokenSource? economicTickCancellation;
+    private static ConcurrentQueue<EconomicTickRequest> economicTickRequests = new ConcurrentQueue<EconomicTickRequest>();
+    private static ConcurrentQueue<EconomicTickWork> economicTickResults = new ConcurrentQueue<EconomicTickWork>();
+    private static SemaphoreSlim economicTickSignal = new SemaphoreSlim(0);
+    private static long economicWorkerGeneration;
+    private static int economicTickPending;
+    private static RuntimeStateCapture? economicCapture;
+    private static EconomicTickRequest? economicCaptureRequest;
     private static IServer? configuredServer;
     private static IClient? configuredClient;
     private static MultiplayerServerProtocolAdapter? serverProtocol;
@@ -196,6 +306,9 @@ public static class Main
     public static bool Load(UnityModManager.ModEntry modEntry)
     {
         mod = modEntry;
+        // A reload must not let a worker belonging to the previous runtime
+        // publish into the newly initialized career state.
+        ResetEconomicWorker();
         // Resolve the authority before installing any gameplay or save hooks. Invalid
         // dedicated configuration aborts loading rather than reverting to a local host.
         RuntimeAuthorityMode.Configure(Path.Combine(modEntry.Path, "dedicated-authority.json"));
@@ -217,6 +330,7 @@ public static class Main
         UnityIndustrialCargoTagGuard.Configure(() => runtimeStateProvider?.Current, roleDetector, StageIndustrialSave, message => modEntry.Logger.Warning(message));
         RemoteDispatchBridge.Configure(BuildRemoteDispatchState, HandleRemoteDispatchIntent);
         RemoteDispatchBridge.ConfigureTrustedTransport(BuildRemoteDispatchState, HandleRemoteDispatchIntent);
+        RemoteDispatchBridge.ConfigureStateSnapshots(BuildRemoteDispatchStateObject, BuildRemoteDispatchStateObject);
         ConfigureManagementWeb(modEntry);
         WorldStreamingInit.LoadingFinished += OnWorldLoadingFinished;
         runtimeSettings = RuntimeSaveSettings.Load(
@@ -248,7 +362,8 @@ public static class Main
         if (runtimeSettings.EnableSaveGameDataHook)
         {
             runtimeStateProvider = new AcquisitionRuntimeStateProvider();
-            var handler = new HostSaveGameUpdateHandler(runtimeStateProvider, message => modEntry.Logger.Log("[correlation=save-runtime] " + message));
+            var handler = new HostSaveGameUpdateHandler(runtimeStateProvider, message => modEntry.Logger.Log("[correlation=save-runtime] " + message),
+                Path.Combine(modEntry.Path, "persistent-journal"), (message, exception) => modEntry.Logger.Error("[correlation=persistent-journal] " + message + " " + exception));
             SaveGameRuntimeHook.Configure(
                 new SaveGameFeatureFlags { EnableSaveGameDataHook = true },
                 roleDetector,
@@ -290,6 +405,8 @@ public static class Main
         managementWebTransportSessions.Clear();
         RemoteDispatchBridge.ConfigureWeb(BuildManagementWebShell, BuildManagementWebSnapshot, HandleManagementWebIntent, ReadManagementWebAsset);
         RemoteDispatchBridge.ConfigureTrustedWebTransport(BuildManagementWebShell, BuildManagementWebSnapshot, HandleManagementWebIntent, ReadManagementWebAsset);
+        RemoteDispatchBridge.ConfigureManagementSnapshots(BuildManagementWebSnapshotObject, BuildManagementWebSnapshotObject);
+        RemoteDispatchBridge.ConfigureAsyncSnapshots(BuildDispatchJsonAsync, BuildManagementJsonAsync);
         entry.Logger.Log("[correlation=management-web] [event=composition-ready] modules=" + dispatch.ModuleId + "," + loaded.ModuleId + ", states=" + dispatch.State + "," + loaded.State + ", authority=host-only, transport=RemoteDispatchLive");
     }
 
@@ -306,21 +423,49 @@ public static class Main
         => BuildManagementWebShell(transportIdentity);
 
     private static string BuildManagementWebSnapshot(string transportIdentity)
+        => Newtonsoft.Json.JsonConvert.SerializeObject(BuildManagementWebSnapshotObject(transportIdentity), webJsonSettings);
+
+    private static Task<string> BuildDispatchJsonAsync(string identity, bool loopback)
+    {
+        return SnapshotWorker.Run(() => CaptureDispatchSnapshot(identity, loopback),
+            captured => Newtonsoft.Json.JsonConvert.SerializeObject(captured, webJsonSettings));
+    }
+
+    private static object CaptureDispatchSnapshot(string identity, bool loopback)
+    {
+        var started = RuntimePerformance.Start();
+        try { return BuildRemoteDispatchStateObject(identity, loopback); }
+        finally { RuntimePerformance.Record("web-capture-main", started); }
+    }
+
+    private static Task<string> BuildManagementJsonAsync(string identity, bool loopback)
     {
         RequireHostAuthority();
-        var snapshot = (managementWebPort ?? throw new InvalidOperationException("BDVM management web port is unavailable."))
+        var correlation = Guid.NewGuid().ToString("N");
+        return SnapshotWorker.Run(() => CaptureDispatchSnapshot(identity, loopback), captured => {
+            var source = Newtonsoft.Json.Linq.JObject.FromObject(captured, Newtonsoft.Json.JsonSerializer.Create(webJsonSettings));
+            var view = RuntimeManagementPort.ProjectSnapshot(source, correlation);
+            return Newtonsoft.Json.JsonConvert.SerializeObject(view, webJsonSettings);
+        });
+    }
+
+    private static ManagementWebSnapshot BuildManagementWebSnapshotObject(string transportIdentity)
+    {
+        RequireHostAuthority();
+        return (managementWebPort ?? throw new InvalidOperationException("BDVM management web port is unavailable."))
             .ReadSnapshot(transportIdentity, Guid.NewGuid().ToString("N"));
-        return Newtonsoft.Json.JsonConvert.SerializeObject(snapshot, webJsonSettings);
     }
 
     private static string BuildManagementWebSnapshot(string transportIdentity, bool isLoopbackRequest)
+        => Newtonsoft.Json.JsonConvert.SerializeObject(BuildManagementWebSnapshotObject(transportIdentity, isLoopbackRequest), webJsonSettings);
+
+    private static ManagementWebSnapshot BuildManagementWebSnapshotObject(string transportIdentity, bool isLoopbackRequest)
     {
         RequireHostAuthority();
         var state = runtimeStateProvider?.Current ?? throw new InvalidOperationException("BDVM career state is unavailable.");
         var actorId = ResolveAuthenticatedRuntimeActor(transportIdentity, state, isLoopbackRequest);
-        var snapshot = (managementWebPort ?? throw new InvalidOperationException("BDVM management web port is unavailable."))
+        return (managementWebPort ?? throw new InvalidOperationException("BDVM management web port is unavailable."))
             .ReadSnapshot(actorId, Guid.NewGuid().ToString("N"));
-        return Newtonsoft.Json.JsonConvert.SerializeObject(snapshot, webJsonSettings);
     }
 
     private static string HandleManagementWebIntent(string transportIdentity, string payload)
@@ -494,6 +639,8 @@ public static class Main
 
     private static void OnWorldLoadingFinished()
     {
+        ResetEconomicWorker();
+        SaveGameRuntimeHook.ResetCareer();
         selfShuntIndustrialLifecycle?.Dispose();
         selfShuntIndustrialLifecycle = null;
         industrialCorrelationsRestored = false;
@@ -504,6 +651,8 @@ public static class Main
 
     private static void OnUpdate(UnityModManager.ModEntry entry, float deltaTime)
     {
+        RuntimePerformance.Report(entry);
+        SaveGameRuntimeHook.PumpJournal();
         if (RuntimeAuthorityMode.IsDelegated)
         {
             DedicatedUnityLink.Tick(MultiplayerAPI.Instance?.CurrentTick ?? 0);
@@ -525,10 +674,11 @@ public static class Main
             ReconcileReturnedLeaseCars(entry);
         }
         AdvanceEconomicRuntime(entry, deltaTime);
-        if (runtimeSettings.EnableWalletBridge && runtimeStateProvider?.Current != null && !runtimeStateProvider.Current.OperatingCosts.Any(x => x.State == OperatingCostState.Open || x.ExternalSettlement == ExternalSettlementState.Pending || x.ExternalSettlement == ExternalSettlementState.Conflict) && !runtimeStateProvider.Current.Assignments.Any(x => x.State == MissionAssignmentState.Active || x.State == MissionAssignmentState.CompletionPending || x.ExternalSettlement == ExternalSettlementState.Pending) && ++walletSyncFrames >= 120)
+        var observedRuntimeState = runtimeStateProvider?.Current;
+        if (runtimeSettings.EnableWalletBridge && observedRuntimeState != null && ++walletSyncFrames >= 120)
         {
             walletSyncFrames = 0;
-            TrySynchronizeHostWallet(entry, "periodic-vanilla-observation");
+            if (!observedRuntimeState.OperatingCosts.Any(x => x.State == OperatingCostState.Open || x.ExternalSettlement == ExternalSettlementState.Pending || x.ExternalSettlement == ExternalSettlementState.Conflict) && !observedRuntimeState.Assignments.Any(x => x.State == MissionAssignmentState.Active || x.State == MissionAssignmentState.CompletionPending || x.ExternalSettlement == ExternalSettlementState.Pending)) TrySynchronizeHostWallet(entry, "periodic-vanilla-observation");
         }
 
         if (!automaticExportPending) return;
@@ -561,23 +711,80 @@ public static class Main
         if (runtimeStateProvider?.Current == null || runtimeRoleDetector == null || Time.timeScale <= 0f || deltaTime <= 0f ||
             !NetworkAuthorityPolicy.CanExecuteEconomy(runtimeRoleDetector.Detect(), out _)) return;
         economicClockAccumulator += deltaTime;
-        var activeTicks = Math.Min((long)Math.Floor(economicClockAccumulator), 1L);
-        var skippedTicks = Math.Min((long)Math.Floor(pendingTimeSkipTicks), 1L);
+
+        if (economicTickResults.TryDequeue(out var work))
+        {
+            Interlocked.Exchange(ref economicTickPending, 0);
+            economicProjectionRevision = -1;
+            var applied = false;
+            try
+            {
+                if (work.Failure != null) throw work.Failure;
+                var commitStarted = RuntimePerformance.Start();
+                var committed = work.MutationVersion == SaveGameRuntimeHook.MutationVersion && work.Delta != null && runtimeStateProvider.TryApplyPeriodicEconomicDelta(work.ExpectedRevision, work.Delta);
+                RuntimePerformance.Record("economic-commit", commitStarted);
+                if (!committed)
+                {
+                    RequeueEconomicWork(work);
+                    entry.Logger.Warning("[correlation=" + work.Correlation + "] [event=economic-clock-conflict] worker result discarded because runtime state changed while processing.");
+                    return;
+                }
+                applied = true;
+                SaveGameRuntimeHook.RecordPeriodic(work.JournalEvent!);
+
+                var committedSnapshot = runtimeStateProvider.Current!;
+                var committedRevision = runtimeStateProvider.Revision;
+                var committedMutationVersion = SaveGameRuntimeHook.MutationVersion;
+                // The worker publishes only changed wallets. Native settlement
+                // stays on Unity and observes the already committed projection.
+                var localId = runtimeStateProvider.LocalPlayerId;
+                var localChange = work.Delta!.Wallets.SingleOrDefault(value => value.Value.Account.Kind == AccountKind.Player && value.Value.Account.OwnerId == localId);
+                work.PersonalDelta = localChange == null ? 0 : -work.Delta.Ledger.Where(value => value.Debit?.Kind == AccountKind.Player && value.Debit.OwnerId == localId).Sum(value => value.Amount);
+                EnsurePlayableEconomy(committedSnapshot, work.Tick);
+                if (runtimeStateProvider.Revision != committedRevision && !SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance))
+                    throw new InvalidOperationException("Changed catalogue/bootstrap state could not be staged for journal observation.");
+                if (runtimeSettings.EnableWalletBridge && work.PersonalDelta != 0)
+                {
+                    if (work.PersonalDelta > 0)
+                        hostWallet.Credit(work.PersonalDelta);
+                    else if (!hostWallet.TryDebit(-work.PersonalDelta))
+                        entry.Logger.Error("[correlation=" + work.Correlation + "] [event=economic-clock-wallet-settlement-pending] internal wallet changed but the vanilla wallet could not be debited.");
+                }
+                foreach (var remoteActor in ConnectedRemotePlayerIds())
+                    SettleRemoteWalletToInternal(remoteActor, work.Correlation + ":after:" + remoteActor);
+                SaveGameRuntimeHook.MarkDirty();
+                var projectionUnchanged = runtimeStateProvider.Revision == committedRevision && SaveGameRuntimeHook.MutationVersion == committedMutationVersion + 1;
+                if (projectionUnchanged && runtimeStateProvider.Revision == committedRevision)
+                {
+                    economicProjectionRevision = committedRevision;
+                    economicProjectionMutationVersion = SaveGameRuntimeHook.MutationVersion;
+                }
+                if (work.SkippedTicks > 0)
+                    entry.Logger.Log("[correlation=" + work.Correlation + "] [event=economic-clock-advanced] activeTicks=" + work.ActiveTicks + ", timeSkipTicks=" + work.SkippedTicks + ", tick=" + work.Tick + ", personalDelta=" + work.PersonalDelta);
+            }
+            catch (Exception exception)
+            {
+                if (!applied) RequeueEconomicWork(work);
+                entry.Logger.Error("[correlation=economic-clock] [event=economic-clock-worker-apply-failed] " + exception);
+            }
+        }
+
+        if (economicCapture != null) { ContinueEconomicCapture(entry); return; }
+        if (Volatile.Read(ref economicTickPending) != 0) return;
+        // Catch up elapsed time in one domain advance, instead of building one
+        // full snapshot per second of backlog after a slow frame/time skip.
+        var activeTicks = Math.Min((long)Math.Floor(economicClockAccumulator), 60L);
+        var skippedTicks = Math.Min((long)Math.Floor(pendingTimeSkipTicks), 3600L);
         if (activeTicks < 1 && skippedTicks <= 0) return;
         if (activeTicks > 0) economicClockAccumulator -= activeTicks;
         if (skippedTicks > 0) pendingTimeSkipTicks -= skippedTicks;
-        economicTicksSinceSave = checked(economicTicksSinceSave + activeTicks + skippedTicks);
-        var snapshot = runtimeStateProvider.Current;
-        var correlation = "economic-clock:" + snapshot.LeaseClock.ActiveTick + ":" + activeTicks + ":" + skippedTicks;
-        var domainCommitted = false; var externalDebited = false; long previewDelta = 0;
-        var remoteActors = ConnectedRemotePlayerIds();
+        var currentSnapshot = runtimeStateProvider.Current;
+        var correlation = "economic-clock:" + currentSnapshot.LeaseClock.ActiveTick + ":" + activeTicks + ":" + skippedTicks;
         try
         {
             if (runtimeSettings.EnableWalletBridge) TrySynchronizeHostWallet(entry, "before-economic-clock");
-            foreach (var remoteActor in remoteActors)
+            foreach (var remoteActor in ConnectedRemotePlayerIds())
                 SynchronizeRemotePlayerWallet(remoteActor, correlation + ":before:" + remoteActor);
-            var playerWallet = snapshot.Economy.Wallets.SingleOrDefault(value => value.Account.Kind == AccountKind.Player && value.Account.OwnerId == runtimeStateProvider.LocalPlayerId);
-            var personalBefore = playerWallet?.Balance ?? 0;
             var advance = new LeaseClockAdvance
             {
                 CommandId = correlation,
@@ -587,52 +794,156 @@ public static class Main
                 SessionOpen = true,
                 Paused = false
             };
-            previewDelta = 0;
-            var tick = runtimeStateProvider.AdvanceEconomicClockWithoutLeasing(advance, runtimeRoleDetector);
-            domainCommitted = true;
-            EnsurePlayableEconomy(snapshot, tick);
-            var personalAfter = playerWallet?.Balance ?? personalBefore;
-            if (runtimeSettings.EnableWalletBridge && personalAfter != personalBefore)
+            var authority = runtimeRoleDetector.Detect();
+            var provider = runtimeStateProvider ?? throw new InvalidOperationException("Runtime state provider is unavailable.");
+            var cancellation = economicTickCancellation ?? throw new InvalidOperationException("Economic worker cancellation is unavailable.");
+            if (Interlocked.CompareExchange(ref economicTickPending, 1, 0) != 0) return;
+            var mutationVersion = SaveGameRuntimeHook.MutationVersion;
+            economicCaptureRequest = new EconomicTickRequest
             {
-                var delta = personalAfter - personalBefore;
-                if (delta != previewDelta) throw new InvalidOperationException("Lease clock preview diverged from the committed wallet delta.");
-                if (delta > 0) hostWallet.Credit(delta);
-            }
-            if (runtimeSettings.EnableIndustrialPilot)
+                Authority = authority,
+                Advance = advance,
+                IndustrialPilot = runtimeSettings.EnableIndustrialPilot,
+                Correlation = correlation,
+                Generation = Volatile.Read(ref economicWorkerGeneration),
+                Cancellation = cancellation.Token,
+                MutationVersion = mutationVersion
+                , ExpectedRevision = provider.Revision
+                , ExpectedTick = provider.Current!.LeaseClock.ActiveTick
+            };
+            if (economicProjectionRevision == provider.Revision && economicProjectionMutationVersion == mutationVersion)
             {
-                var engine = IndustrialEngine(snapshot);
-                foreach (var contract in snapshot.IndustrialContracts.Where(value => !value.StockDriven && value.State == IndustrialContractState.Reserved && value.PreparationExpiresTick > 0 && value.PreparationExpiresTick <= tick).ToArray())
-                    engine.ExpirePreparation(correlation + ":expire:" + contract.ContractId, contract.ContractId, tick);
-                foreach (var recipe in snapshot.IndustrialRecipes.OrderBy(value => value.RecipeId).ToArray())
-                    engine.AdvanceProduction(correlation + ":production:" + recipe.RecipeId, recipe.RecipeId, tick);
-            }
-            foreach (var remoteActor in remoteActors)
-                SettleRemoteWalletToInternal(remoteActor, correlation + ":after:" + remoteActor);
-            SaveGameRuntimeHook.MarkDirty();
-            if (skippedTicks > 0 || economicTicksSinceSave >= 60)
-            {
-                if (!SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance)) throw new InvalidOperationException("Economic clock state could not be staged in SaveGameData.");
-                economicTicksSinceSave = 0;
-            }
-            if (skippedTicks > 0)
-                entry.Logger.Log("[correlation=" + correlation + "] [event=economic-clock-advanced] activeTicks=" + activeTicks + ", timeSkipTicks=" + skippedTicks + ", tick=" + tick + ", personalDelta=" + (personalAfter - personalBefore));
-        }
-        catch (Exception exception)
-        {
-            if (!domainCommitted)
-            {
-                if (externalDebited) hostWallet.Credit(-previewDelta);
-                economicTicksSinceSave = Math.Max(0, economicTicksSinceSave - activeTicks - skippedTicks);
-                economicClockAccumulator += activeTicks;
-                pendingTimeSkipTicks += skippedTicks;
-                entry.Logger.Error("[correlation=" + correlation + "] [event=economic-clock-refused-before-commit] externalRefunded=" + externalDebited + ", error=" + exception);
+                economicTickRequests.Enqueue(economicCaptureRequest);
+                economicCaptureRequest = null;
+                economicTickSignal.Release();
             }
             else
             {
-                var staged = SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance);
-                entry.Logger.Error("[correlation=" + correlation + "] [event=economic-clock-postcommit-failure] requeued=false, emergencySaveStaged=" + staged + ", error=" + exception);
+                economicCapture = provider.BeginPeriodicEconomicCapture(() => ReferenceEquals(runtimeStateProvider, provider) && !cancellation.IsCancellationRequested &&
+                    SaveGameRuntimeHook.MutationVersion == mutationVersion);
+                ContinueEconomicCapture(entry);
             }
         }
+        catch (Exception exception)
+        {
+            economicCapture?.Dispose(); economicCapture = null; economicCaptureRequest = null;
+            Interlocked.Exchange(ref economicTickPending, 0);
+            RequeueEconomicWork(new EconomicTickWork { Correlation = correlation, ActiveTicks = activeTicks, SkippedTicks = skippedTicks });
+            entry.Logger.Error("[correlation=" + correlation + "] [event=economic-clock-worker-start-failed] " + exception);
+        }
+    }
+
+    private static void ContinueEconomicCapture(UnityModManager.ModEntry entry)
+    {
+        var request = economicCaptureRequest!;
+        var started = RuntimePerformance.Start();
+        try
+        {
+            if (!economicCapture!.Advance()) return;
+            request.Captured = economicCapture.Result;
+            economicCapture.Dispose(); economicCapture = null; economicCaptureRequest = null;
+            economicTickRequests.Enqueue(request);
+            economicTickSignal.Release();
+        }
+        catch (Exception exception)
+        {
+            economicCapture?.Dispose(); economicCapture = null; economicCaptureRequest = null;
+            Interlocked.Exchange(ref economicTickPending, 0);
+            RequeueEconomicWork(new EconomicTickWork { ActiveTicks = request.Advance.ActiveGameplayTicks, SkippedTicks = request.Advance.FastTravelTicks });
+            if (!(exception is OperationCanceledException))
+                entry.Logger.Error("[correlation=" + request.Correlation + "] [event=economic-capture-failed] " + exception);
+        }
+        finally { RuntimePerformance.Record("economic-capture-slice-main", started); }
+    }
+
+    private static void ResetEconomicWorker()
+    {
+        var previousCancellation = economicTickCancellation;
+        var previousSignal = economicTickSignal;
+        previousCancellation?.Cancel();
+        if (economicWorkerLoop != null)
+            _ = economicWorkerLoop.ContinueWith(_ => { previousCancellation?.Dispose(); previousSignal.Dispose(); }, System.Threading.Tasks.TaskScheduler.Default);
+        else previousSignal.Dispose();
+        var requests = new ConcurrentQueue<EconomicTickRequest>();
+        var results = new ConcurrentQueue<EconomicTickWork>();
+        var signal = new SemaphoreSlim(0);
+        economicTickRequests = requests; economicTickResults = results; economicTickSignal = signal;
+        economicTickCancellation = new CancellationTokenSource();
+        var token = economicTickCancellation.Token;
+        var generation = Interlocked.Increment(ref economicWorkerGeneration);
+        economicWorkerLoop = System.Threading.Tasks.Task.Factory.StartNew(() => EconomicWorkerLoop(generation, requests, results, signal, token), token,
+            System.Threading.Tasks.TaskCreationOptions.LongRunning, System.Threading.Tasks.TaskScheduler.Default);
+        Interlocked.Exchange(ref economicTickPending, 0);
+        economicCapture?.Dispose(); economicCapture = null; economicCaptureRequest = null;
+        economicProjectionRevision = -1; economicProjectionMutationVersion = -1;
+        economicClockAccumulator = 0; pendingTimeSkipTicks = 0;
+        playableEconomySnapshot = null; playableEconomyCheckpointId = null; nextPlayableEconomyTick = 0;
+    }
+
+    private static void EconomicWorkerLoop(long generation, ConcurrentQueue<EconomicTickRequest> requests, ConcurrentQueue<EconomicTickWork> results,
+        SemaphoreSlim signal, CancellationToken cancellationToken)
+    {
+        PeriodicEconomicProjection? projection = null;
+        try
+        {
+            while (true)
+            {
+                signal.Wait(cancellationToken);
+                while (requests.TryDequeue(out var request))
+                {
+                    if (request.Generation != generation || request.Generation != Volatile.Read(ref economicWorkerGeneration)) continue;
+                    EconomicTickWork work;
+                    var startedAt = RuntimePerformance.Start();
+                    try
+                    {
+                        if (request.Captured != null) projection = new PeriodicEconomicProjection(request.Captured);
+                        if (projection == null) throw new InvalidOperationException("Economic worker projection is unavailable.");
+                        work = PrepareEconomicTick(projection, request.ExpectedRevision, request.ExpectedTick, request.Authority, request.Advance,
+                            request.IndustrialPilot, request.Correlation, request.Cancellation);
+                        work.MutationVersion = request.MutationVersion;
+                    }
+                    catch (Exception exception)
+                    {
+                        projection = null;
+                        work = new EconomicTickWork
+                        {
+                            Correlation = request.Correlation,
+                            ActiveTicks = request.Advance.ActiveGameplayTicks,
+                            SkippedTicks = request.Advance.FastTravelTicks,
+                            Failure = exception
+                        };
+                    }
+                    RuntimePerformance.Record("economic-worker", startedAt);
+                    if (request.Generation == Volatile.Read(ref economicWorkerGeneration)) results.Enqueue(work);
+                }
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+    }
+
+    private static EconomicTickWork PrepareEconomicTick(PeriodicEconomicProjection projection, long expectedRevision, long expectedTick, NetworkRoleReport authority,
+        LeaseClockAdvance advance, bool industrialPilot, string correlation, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var fixedAuthority = new FixedNetworkRoleDetector(authority);
+        var delta = projection.Advance(advance, fixedAuthority, industrialPilot, expectedTick);
+        cancellationToken.ThrowIfCancellationRequested();
+        return new EconomicTickWork
+        {
+            Delta = delta,
+            JournalEvent = PersistentJournalCodec.Serialize(delta),
+            Correlation = correlation,
+            ExpectedRevision = expectedRevision,
+            ActiveTicks = advance.ActiveGameplayTicks,
+            SkippedTicks = advance.FastTravelTicks,
+            Tick = delta.Clock.ActiveTick
+        };
+    }
+
+    private static void RequeueEconomicWork(EconomicTickWork work)
+    {
+        economicClockAccumulator += work.ActiveTicks;
+        pendingTimeSkipTicks += work.SkippedTicks;
     }
 
     internal static void RecordAuthoritativeTimeSkip(float seconds)
@@ -671,6 +982,7 @@ public static class Main
         if (runtimeSettings.EnableWalletBridge)
             TrySynchronizeHostWallet(entry, "world-load");
         EnsureSelfShuntIndustrialLifecycle(entry);
+        EnsurePlayableEconomy(runtimeStateProvider.Current!, runtimeStateProvider.Current!.LeaseClock.ActiveTick);
         SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance);
         status = "BDVM 0.3.0 beta ready for " + player.PlayerId + ".";
         entry.Logger.Log("[correlation=runtime-bootstrap] Runtime state ready; player=" + player.PlayerId + ", legacyBalancePolicy=host-keeps-existing-balance, walletBridge=" + runtimeSettings.EnableWalletBridge + ", transfers=" + runtimeSettings.EnableCompanyTransfers + ", acquisition=" + runtimeSettings.EnableVehicleAcquisition + ".");
@@ -698,6 +1010,11 @@ public static class Main
         try
         {
             var restored = UnityIndustrialJobAdapter.RestoreCorrelations(runtimeStateProvider.Current, selfShuntIndustrialLifecycle);
+            if (restored > 0)
+            {
+                runtimeStateProvider.MarkStateChanged();
+                SaveGameRuntimeHook.MarkDirty();
+            }
             industrialCorrelationsRestored = true;
             entry.Logger.Log("[correlation=selfshunt-industrial] [event=persisted-correlations-restored] count=" + restored);
         }
@@ -2118,7 +2435,8 @@ public static class Main
             var snapshot = runtimeStateProvider!.Current!;
             PreflightIndustrialActivation(snapshot, contract, snapshot.LeaseClock.ActiveTick);
             var created = UnityIndustrialJobAdapter.CreateForContract(snapshot, contract, selfShuntIndustrialLifecycle ?? throw new InvalidOperationException("SelfShunt industrial lifecycle is unavailable."));
-            var result = IndustrialEngine(snapshot).Activate("industrial-activate:" + correlation, contract.ContractId, snapshot.LeaseClock.ActiveTick);
+            // A preloaded job can synchronously publish LoadingObserved during creation.
+            var result = contract.State == IndustrialContractState.Active ? contract : IndustrialEngine(snapshot).Activate("industrial-activate:" + correlation, contract.ContractId, snapshot.LeaseClock.ActiveTick);
             StageIndustrialSave(); status = created + " Contract state: " + result.State + ".";
             entry.Logger.Log("[correlation=" + correlation + "] [event=industrial-contract-activated] contract=" + result.ContractId + ", job=zero-wage-selfshunt, state=" + result.State);
         }
@@ -2917,7 +3235,8 @@ public static class Main
         {
             var localPlayerId = runtimeStateProvider?.LocalPlayerId;
             if (string.IsNullOrWhiteSpace(localPlayerId)) throw new UnauthorizedAccessException("The local economic player is unavailable.");
-            runtimeStateProvider!.EnsurePersistentPlayer(localPlayerId!, 0);
+            if (!snapshot.Economy.Players.Any(value => value.PlayerId == localPlayerId))
+                runtimeStateProvider!.EnsurePersistentPlayer(localPlayerId!, 0);
             return localPlayerId!;
         }
         var connected = new List<AuthenticatedTransportActor>();
@@ -2930,7 +3249,8 @@ public static class Main
         }
         var actorId = AuthenticatedActorRouting.Resolve(transportIdentity, runtimeStateProvider?.LocalPlayerId,
             snapshot.Economy.Players.Select(value => value.PlayerId), connected);
-        runtimeStateProvider!.EnsurePersistentPlayer(actorId, 0);
+        if (!snapshot.Economy.Players.Any(value => value.PlayerId == actorId))
+            runtimeStateProvider!.EnsurePersistentPlayer(actorId, 0);
         return actorId;
     }
 
@@ -2981,9 +3301,15 @@ public static class Main
         => BuildRemoteDispatchState(transportIdentity, false);
 
     private static string BuildRemoteDispatchState(string transportIdentity, bool isLoopbackRequest)
+        => Newtonsoft.Json.JsonConvert.SerializeObject(BuildRemoteDispatchStateObject(transportIdentity, isLoopbackRequest), webJsonSettings);
+
+    private static object BuildRemoteDispatchStateObject(string transportIdentity)
+        => BuildRemoteDispatchStateObject(transportIdentity, false);
+
+    private static object BuildRemoteDispatchStateObject(string transportIdentity, bool isLoopbackRequest)
     {
         if (runtimeRoleDetector?.Detect().Role == NetworkRole.MultiplayerClient)
-            return RequestClientAuthoritativeState();
+            return Newtonsoft.Json.Linq.JObject.Parse(RequestClientAuthoritativeState());
         RequireHostAuthority(); var snapshot = runtimeStateProvider?.Current ?? throw new InvalidOperationException("BDVM career state is unavailable."); var playerId = ResolveAuthenticatedRuntimeActor(transportIdentity, snapshot, isLoopbackRequest);
         if (!string.Equals(playerId, runtimeStateProvider!.LocalPlayerId, StringComparison.Ordinal))
             SynchronizeRemotePlayerWallet(playerId, "state:" + Guid.NewGuid().ToString("N"));
@@ -3060,18 +3386,19 @@ public static class Main
                                 select new { originFacilityId = origin.facilityId, destinationFacilityId = destination.facilityId, cargoIds }).ToArray();
         var availableFreightWagons = snapshot.Fleet.Where(value => visibleAssetIds.Contains(value.AssetId, StringComparer.Ordinal) &&
             value.Kind == FleetVehicleKind.FreightWagon && value.OperationalState == FleetOperationalState.Available).ToArray();
-        var wagonCompatibility = new UnityWagonCompatibilityPort(snapshot);
+        var wagonCompatibility = UnityWagonCompatibilityPort.ForReadOnlySnapshot(snapshot);
+        var assetsById = snapshot.Assets.Assets.ToDictionary(asset => asset.AssetId, StringComparer.Ordinal);
         var compatibleWagonsByCargo = industrialRoutes.SelectMany(route => route.cargoIds).Distinct(StringComparer.Ordinal)
             .ToDictionary(cargoId => cargoId, cargoId => availableFreightWagons.Where(wagon =>
             {
-                var definitionId = snapshot.Assets.Assets.SingleOrDefault(asset => asset.AssetId == wagon.AssetId)?.DefinitionId;
+                var definitionId = assetsById.TryGetValue(wagon.AssetId, out var asset) ? asset.DefinitionId : null;
                 return !string.IsNullOrWhiteSpace(definitionId) && wagonCompatibility.Inspect(wagon.AssetId, definitionId!, cargoId).Compatible;
             }).Select(wagon => wagon.AssetId).OrderBy(value => value, StringComparer.Ordinal).ToArray(), StringComparer.Ordinal);
         var industrialProjectionEngine = IndustrialEngine(snapshot);
         var rollingStockTags = snapshot.Fleet.Where(value => visibleAssetIds.Contains(value.AssetId, StringComparer.Ordinal)).Select(value =>
         {
             var car = UnityRollingStockResolver.Resolve(snapshot, value.AssetId);
-            var definition = snapshot.Assets.Assets.Single(asset => asset.AssetId == value.AssetId).DefinitionId;
+            var definition = assetsById[value.AssetId].DefinitionId;
             string? blockedReason = null;
             try
             {
@@ -3083,7 +3410,11 @@ public static class Main
             catch (Exception exception) { blockedReason = exception.Message; }
             var loaded = car?.logicCar == null || car.logicCar.LoadedCargoAmount > 0.01f;
             var tag = snapshot.IndustrialCargoTags.SingleOrDefault(item => item.AssetId == value.AssetId);
-            return new { value.AssetId, blockedReason, loaded, loadedCargoAmount = car?.logicCar == null ? 0m : (decimal)car.logicCar.LoadedCargoAmount, sourceFacilityId = tag?.SourceFacilityId, cargoId = tag?.CargoId, lifetime = tag?.Lifetime.ToString(),
+            return new { value.AssetId, blockedReason, loaded, physicallyPresent = car?.logicCar != null,
+                loadedCargoAmount = car?.logicCar == null ? 0m : (decimal)car.logicCar.LoadedCargoAmount,
+                loadedCargoId = car?.logicCar == null || !loaded ? null : car.logicCar.CurrentCargoTypeInCar.ToString(),
+                capacity = car?.logicCar == null ? 0m : (decimal)car.logicCar.capacity,
+                sourceFacilityId = tag?.SourceFacilityId, cargoId = tag?.CargoId, lifetime = tag?.Lifetime.ToString(), dossierId = tag?.DossierId,
                 compatibleCargoIds = value.Kind == FleetVehicleKind.FreightWagon
                     ? cargoChoices.Where(cargo => wagonCompatibility.Inspect(value.AssetId, definition, cargo.id).Compatible).Select(cargo => cargo.id).ToArray() : Array.Empty<string>() };
         }).ToArray();
@@ -3095,23 +3426,29 @@ public static class Main
         var priorIndustrialNeeds = snapshot.IndustrialTransportPolicies.Where(value => value.Enabled)
             .Select(value => industrialProjectionEngine.CurrentTransportNeed(value.PolicyId, Math.Max(0, industrialTick - 30)))
             .Where(value => value != null).Select(value => value!).ToArray();
+        Dictionary<(string facility, string cargo), long> IndexUnitValues(IEnumerable<IndustrialTransportNeed> needs)
+            => needs.SelectMany(value => new[] { value.OriginFacilityId, value.DestinationFacilityId }.Distinct(StringComparer.Ordinal)
+                .Select(facility => new { facility, cargo = value.CargoId, price = value.Quantity <= 0m ? 0m : (value.BaseReward + value.ScarcityBonus) / value.Quantity }))
+                .GroupBy(value => (value.facility, value.cargo)).ToDictionary(group => group.Key, group => decimal.ToInt64(decimal.Floor(group.Average(value => value.price))));
+        var currentUnitValues = IndexUnitValues(liveIndustrialNeeds);
+        var previousUnitValues = IndexUnitValues(priorIndustrialNeeds);
+        var recipeInputs = new HashSet<(string, string)>(snapshot.IndustrialRecipes.Select(value => (value.FacilityId, value.InputCargoId)));
+        var recipeOutputs = snapshot.IndustrialRecipes.GroupBy(value => (value.FacilityId, value.OutputCargoId)).ToDictionary(group => group.Key, group => group.First());
+        var stocksByCargo = snapshot.IndustrialStocks.ToDictionary(value => (value.FacilityId, value.CargoId));
         long UnitValue(string facility, string cargo, bool prior)
         {
-            var rows = (prior ? priorIndustrialNeeds : liveIndustrialNeeds).Where(value => value.CargoId == cargo &&
-                (value.OriginFacilityId == facility || value.DestinationFacilityId == facility)).ToArray();
-            return rows.Length == 0 ? 0 : decimal.ToInt64(decimal.Floor(rows.Average(value => value.Quantity <= 0m ? 0m : (value.BaseReward + value.ScarcityBonus) / value.Quantity)));
+            return (prior ? previousUnitValues : currentUnitValues).TryGetValue((facility, cargo), out var value) ? value : 0;
         }
         string StockRole(string facility, string cargo)
         {
-            var input = snapshot.IndustrialRecipes.Any(value => value.FacilityId == facility && value.InputCargoId == cargo);
-            var output = snapshot.IndustrialRecipes.Any(value => value.FacilityId == facility && value.OutputCargoId == cargo);
+            var input = recipeInputs.Contains((facility, cargo));
+            var output = recipeOutputs.ContainsKey((facility, cargo));
             return input && output ? "InputOutput" : input ? "Input" : output ? "Output" : "Storage";
         }
         string ProductionState(string facility, string cargo, decimal onHand, decimal capacity)
         {
-            var recipe = snapshot.IndustrialRecipes.FirstOrDefault(value => value.FacilityId == facility && value.OutputCargoId == cargo);
-            if (recipe == null) return "NotProducedHere";
-            if (!string.IsNullOrWhiteSpace(recipe.InputCargoId) && snapshot.IndustrialStocks.Single(value => value.FacilityId == facility && value.CargoId == recipe.InputCargoId).OnHand < recipe.InputQuantity) return "StoppedNoInput";
+            if (!recipeOutputs.TryGetValue((facility, cargo), out var recipe)) return "NotProducedHere";
+            if (!string.IsNullOrWhiteSpace(recipe.InputCargoId) && stocksByCargo[(facility, recipe.InputCargoId)].OnHand < recipe.InputQuantity) return "StoppedNoInput";
             var fill = capacity <= 0m ? 1m : onHand / capacity;
             return fill >= 1m ? "StoppedFull" : fill > 0.8m ? "Slowing" : "FullRate";
         }
@@ -3144,7 +3481,7 @@ public static class Main
             financing = new { enabled = runtimeSettings.EnableFinancing, pools = snapshot.Financing.Pools.Select(x => new { x.PoolId, x.AvailableCapital, x.InitialCapital, x.ReceivedPayments, x.WrittenOff, x.Version }), contracts = snapshot.Financing.Contracts.Where(x => visibility.CanView(x.Debtor)).Select(x => new { x.ContractId, kind = x.Kind.ToString(), debtor = x.Debtor.Key, x.PrincipalLimit, x.ReservedCapital, x.OutstandingPrincipal, x.AccruedInterest, x.InterestBasisPoints, x.MinimumInstallment, x.IntervalTicks, x.NextDueTick, x.MaturityTick, x.GuaranteeAmount, x.HeldGuarantee, state = x.State.ToString(), x.Terms, x.Version }) },
             triageAssistance = new { enabled = runtimeSettings.EnableTriageAssistance, executionAdapter = "disabled-until-public-selfshunt-hook-is-proven", plans = snapshot.TriageAssistance.Plans.Where(x => visibleAssignmentIds.Contains(x.AssignmentId, StringComparer.Ordinal)).Select(x => new { x.PlanId, x.AssignmentId, level = x.Level.ToString(), x.AssetIds, x.OrderedTrackIds, state = x.State.ToString(), x.ResultCode, x.Version }) }
         };
-        return Newtonsoft.Json.JsonConvert.SerializeObject(payload, webJsonSettings);
+        return DetachedWebSnapshot.Capture(payload, webJsonSettings);
     }
 
     private static IReadOnlyDictionary<string, string> ReadLiveFleetLocations(VehicleAcquisitionSnapshot snapshot)
@@ -3214,12 +3551,21 @@ public static class Main
 
     private static long nextPlayableEconomyTick;
     private static VehicleAcquisitionSnapshot? playableEconomySnapshot;
+    private static string? playableEconomyCheckpointId;
 
     private static void EnsurePlayableEconomy(VehicleAcquisitionSnapshot snapshot, long tick)
     {
-        if (ReferenceEquals(playableEconomySnapshot, snapshot) && tick < nextPlayableEconomyTick) return;
+        if (string.Equals(playableEconomyCheckpointId, snapshot.CheckpointId, StringComparison.Ordinal) && tick < nextPlayableEconomyTick) return;
+        var bootstrap = !string.Equals(playableEconomyCheckpointId, snapshot.CheckpointId, StringComparison.Ordinal);
         playableEconomySnapshot = snapshot;
+        playableEconomyCheckpointId = snapshot.CheckpointId;
         nextPlayableEconomyTick = tick + 60;
+        // This routine adopts legacy data and can mutate the live domain graph
+        // without going through a provider command. Invalidate the prepared
+        // worker payload before touching it.
+        if (bootstrap)
+        {
+        runtimeStateProvider?.MarkStateChanged();
         foreach (var fleet in snapshot.Fleet.Where(value => value.Kind == FleetVehicleKind.Unknown).ToArray())
         {
             var asset = snapshot.Assets.Assets.Single(value => value.AssetId == fleet.AssetId);
@@ -3238,10 +3584,13 @@ public static class Main
                          (value.State == IndustrialContractState.Offered || value.State == IndustrialContractState.Reserved)).ToArray())
                 migrationEngine.Cancel("stock-driven-migration:" + legacyContract.ContractId, legacyContract.ContractId);
         }
+        }
 
-        var depot = LeaseReturnTrackRules(snapshot).OrderBy(value => value.TrackId, StringComparer.Ordinal).FirstOrDefault();
-        if (depot != null)
+        if (bootstrap)
         {
+          var depot = LeaseReturnTrackRules(snapshot).OrderBy(value => value.TrackId, StringComparer.Ordinal).FirstOrDefault();
+          if (depot != null)
+          {
             var definitions = new UnityVehicleDefinitionReader().ReadLoadedDefinitions("default-catalog")
                 .Where(value => value.Resolution == ResolutionState.Resolved && !string.IsNullOrWhiteSpace(value.ExistingDefinitionId))
                 .GroupBy(value => value.ExistingDefinitionId!, StringComparer.Ordinal).Where(group => group.Count() == 1).Select(group => group.Single());
@@ -3253,13 +3602,14 @@ public static class Main
                 var price = kind == FleetVehicleKind.Locomotive ? (id == "LocoDE2" ? 40000L : 150000L) : kind == FleetVehicleKind.PassengerCar ? 20000L : 10000L;
                 runtimeStateProvider!.ConfigureFiniteMarketDefinition(id, kind.ToString(), price, 0, 0.8m, 1.2m, 0.5m, depot.TrackId, 3);
             }
+          }
+        }
             foreach (var stock in snapshot.Market.Stock.Where(value => value.Available > 0).ToArray())
             {
                 if (snapshot.Market.Listings.Any(value => value.DefinitionId == stock.DefinitionId && value.LocationId == stock.LocationId &&
                     (value.State == MarketListingState.Available || value.State == MarketListingState.Reserved || value.State == MarketListingState.DeliveryPending))) continue;
                 runtimeStateProvider!.GenerateFiniteMarketOrder("automatic-offer:" + Guid.NewGuid().ToString("N"), stock.DefinitionId, stock.LocationId, runtimeRoleDetector!, new UnityExistingVehicleOwnershipAdapter());
             }
-        }
     }
 
     private static string FriendlyLocationName(string id)
@@ -3339,6 +3689,11 @@ public static class Main
     {
         var adapter = multiplayerWallet ?? throw new InvalidOperationException("The persistent Multiplayer wallet capability is unavailable.");
         var external = adapter.EnsureAndRead(actorId, correlation, runtimeSettings.StartingPersonalBalance);
+        var economy = runtimeStateProvider!.Current!.Economy;
+        var observedWallet = economy.Wallets.SingleOrDefault(value => value.Account.Kind == AccountKind.Player && value.Account.OwnerId == actorId);
+        var observedMirror = economy.ExternalWalletMirrors.SingleOrDefault(value => value.PlayerId == actorId);
+        if (observedWallet?.Balance == external && observedMirror?.LastSynchronizedBalance == external)
+            return external;
         var plan = runtimeStateProvider!.PlanExternalWalletMirror(actorId, external, correlation);
         long synchronized;
         switch (plan.Action)
@@ -3364,6 +3719,8 @@ public static class Main
                 throw new InvalidOperationException("The persistent Multiplayer wallet and BDVM wallet both changed since their last synchronized generation; automatic reconciliation is refused.");
         }
         runtimeStateProvider.CompleteExternalWalletMirror(actorId, synchronized, correlation);
+        if (!SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance))
+            throw new InvalidOperationException("The changed Multiplayer wallet could not be staged for save and journal observation.");
         if (plan.Action != ExternalWalletMirrorAction.None)
             mod?.Logger.Log("[correlation=" + correlation + "] [event=multiplayer-wallet-reconciled] actor=" + actorId + ", action=" + plan.Action + ", amount=" + plan.Amount + ", balance=" + synchronized);
         return synchronized;
@@ -4188,7 +4545,7 @@ public static class Main
                     EnsureSelfShuntIndustrialLifecycle(mod ?? throw new InvalidOperationException("BDVM mod entry is unavailable."));
                     PreflightIndustrialActivation(snapshot, contract, tick);
                     UnityIndustrialJobAdapter.CreateForContract(snapshot, contract, selfShuntIndustrialLifecycle ?? throw new InvalidOperationException("SelfShunt industrial lifecycle is unavailable."));
-                    contract = engine.Activate("remote-industry-stock-activate:" + correlation, contract.ContractId, tick);
+                    if (contract.State != IndustrialContractState.Active) contract = engine.Activate("remote-industry-stock-activate:" + correlation, contract.ContractId, tick);
                 }
                 catch
                 {
@@ -4243,7 +4600,7 @@ public static class Main
                     EnsureSelfShuntIndustrialLifecycle(mod ?? throw new InvalidOperationException("BDVM mod entry is unavailable."));
                     PreflightIndustrialActivation(snapshot, contract, tick);
                     UnityIndustrialJobAdapter.CreateForContract(snapshot, contract, selfShuntIndustrialLifecycle ?? throw new InvalidOperationException("SelfShunt industrial lifecycle is unavailable."));
-                    contract = engine.Activate("remote-industry-activate:" + correlation, contractId, tick);
+                    if (contract.State != IndustrialContractState.Active) contract = engine.Activate("remote-industry-activate:" + correlation, contractId, tick);
                 }
                 else if (operation == "observe-loading") contract = engine.RecordLoading("remote-industry-loading:" + correlation, contractId,
                     (string?)body["assetId"] ?? "", (decimal?)body["cumulativeQuantity"] ?? 0m, tick);
