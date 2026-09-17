@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Update="runtime-settings.validation.json" CopyToOutputDirectory="PreserveNewest" />
+    <Compile Include="..\..\..\BDVM.Core\Domain\*.cs" Link="Domain\Core\%(Filename)%(Extension)" />
+    <Compile Include="..\..\..\BDVM.Companies\Domain\*.cs" Link="Domain\Companies\%(Filename)%(Extension)" />
+    <Compile Include="..\..\..\BDVM.Fleet\Domain\*.cs" Link="Domain\Fleet\%(Filename)%(Extension)" />
+    <Compile Include="..\..\..\BDVM.Market\Domain\*.cs" Link="Domain\Market\%(Filename)%(Extension)" />
+    <Compile Include="..\..\..\BDVM.Operations\Domain\*.cs" Link="Domain\Operations\%(Filename)%(Extension)" />
+    <Compile Include="..\..\..\BDVM.Passengers\Domain\*.cs" Link="Domain\Passengers\%(Filename)%(Extension)" />
+    <Compile Include="..\..\..\BDVM.MultiplayerBridge\Domain\*.cs" Link="Domain\Multiplayer\%(Filename)%(Extension)" />
+    <Compile Include="..\..\..\BDVM.MultiplayerBridge\Integration\NetworkRoleDetector.cs" Link="Integration\NetworkRoleDetector.cs" />
+    <Compile Include="..\..\..\BDVM.Core\Integration\SaveGameAutomaticUpdateGate.cs" Link="Integration\SaveGameAutomaticUpdateGate.cs" />
+  </ItemGroup>
+</Project>

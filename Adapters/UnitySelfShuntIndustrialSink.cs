@@ -11,13 +11,15 @@ public sealed class UnitySelfShuntIndustrialSink : ISelfShuntIndustrialLifecycle
     private readonly INetworkRoleDetector authority;
     private readonly Func<bool> checkpoint;
     private readonly Action<string> log;
+    private readonly Action<string> settleWallet;
 
-    public UnitySelfShuntIndustrialSink(AcquisitionRuntimeStateProvider provider, INetworkRoleDetector authority, Func<bool> checkpoint, Action<string>? log = null)
+    public UnitySelfShuntIndustrialSink(AcquisitionRuntimeStateProvider provider, INetworkRoleDetector authority, Func<bool> checkpoint, Action<string>? log = null, Action<string>? settleWallet = null)
     {
         this.provider = provider ?? throw new ArgumentNullException(nameof(provider));
         this.authority = authority ?? throw new ArgumentNullException(nameof(authority));
         this.checkpoint = checkpoint ?? throw new ArgumentNullException(nameof(checkpoint));
         this.log = log ?? (_ => { });
+        this.settleWallet = settleWallet ?? (_ => { });
     }
 
     public bool TryObserveExternalJob(string operationId, string jobId, string stationId, string cargoId) => Execute(operationId, jobId, () =>
@@ -93,9 +95,13 @@ public sealed class UnitySelfShuntIndustrialSink : ISelfShuntIndustrialLifecycle
         {
             if (string.IsNullOrWhiteSpace(operationId) || string.IsNullOrWhiteSpace(jobId)) return false;
             if (!NetworkAuthorityPolicy.CanExecuteEconomy(authority.Detect(), out var reason)) throw new InvalidOperationException(reason);
+            var beneficiary = Contract(jobId).Beneficiary;
+            if (beneficiary.Kind == AccountKind.Player) settleWallet(beneficiary.OwnerId);
+            provider.MarkStateChanged();
             action();
             IndustrialEconomyValidation.Validate(Snapshot());
             if (!checkpoint()) throw new InvalidOperationException("Industrial lifecycle checkpoint failed.");
+            if (beneficiary.Kind == AccountKind.Player) settleWallet(beneficiary.OwnerId);
             log("[event=selfshunt-industrial-applied] operation=" + operationId + ", job=" + jobId);
             return true;
         }

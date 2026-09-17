@@ -110,6 +110,7 @@ internal sealed class RuntimeManagementPort : IManagementAuthoritativePort
             ["name"] = (string?)row["displayName"] == (string?)row["definitionId"] ? ModelName(source, (string?)row["definitionId"] ?? "") : (string?)row["displayName"] ?? "Rolling stock",
             ["model"] = ModelName(source, (string?)row["definitionId"] ?? ""), ["kind"] = (string?)row["kind"] ?? "Unknown",
             ["availability"] = (string?)row["state"] == "Stored" ? "Stored — make available in Fleet to use for work" : (string?)row["state"] ?? "Unknown",
+            ["ownerType"] = ((string?)row["owner"] ?? "").StartsWith("Company:", StringComparison.Ordinal) ? "Company" : ((string?)row["owner"] ?? "").StartsWith("Player:", StringComparison.Ordinal) ? "Player" : "Unknown",
             ["owner"] = Account((string?)row["owner"] ?? ""), ["track"] = (string?)row["lastKnownLocation"] ?? "Not currently located",
             ["technicalDetails"] = row.ToObject<Dictionary<string, object>>()!
         }).ToArray();
@@ -528,10 +529,18 @@ internal sealed class RuntimeManagementPort : IManagementAuthoritativePort
                     new Dictionary<string, object> { ["action"] = "fleet.set-state", ["assetId"] = id, ["state"] = "Available" }));
             actions.Add(Action("fleet", "Rename — " + label, "bdvm.management.fleet.rename.v1",
                 new Dictionary<string, object> { ["assetId"] = id }, "", Field("displayName", "Vehicle name", "text", (string?)vehicle["displayName"] ?? "", true)));
-            if (currentCompany != null && string.Equals((string?)vehicle["owner"], "Player:" + actorId, StringComparison.Ordinal))
+            var transferable = (string?)vehicle["state"] == "Available" || (string?)vehicle["state"] == "Stored";
+            var companyActive = currentCompany != null && (bool?)currentCompany["liquidating"] != true;
+            if (companyActive && transferable && string.Equals((string?)vehicle["owner"], "Player:" + actorId, StringComparison.Ordinal))
                 actions.Add(Action("fleet", "Transfer to company — " + label, "bdvm.management.fleet-manage.v1",
-                    new Dictionary<string, object> { ["action"] = "fleet.transfer", ["assetId"] = id },
-                    "Transfer this personal vehicle to your company. The company becomes its owner."));
+                    new Dictionary<string, object> { ["action"] = "fleet.transfer", ["assetId"] = id, ["targetKind"] = "Company" },
+                    "Transfer this personal vehicle to " + (string?)currentCompany!["name"] + ". The company becomes its owner."));
+            var canManageCompanyFleet = companyActive && ((string?)currentCompany!["leaderId"] == actorId ||
+                (currentCompany["delegatedPermissions"]?[actorId] as JArray ?? new JArray()).Any(permission => (string?)permission == "ManageFleet"));
+            if (canManageCompanyFleet && transferable && string.Equals((string?)vehicle["owner"], "Company:" + (string?)currentCompany!["companyId"], StringComparison.Ordinal))
+                actions.Add(Action("fleet", "Transfer to me — " + label, "bdvm.management.fleet-manage.v1",
+                    new Dictionary<string, object> { ["action"] = "fleet.transfer", ["assetId"] = id, ["targetKind"] = "Player" },
+                    "Transfer this company vehicle to your personal ownership."));
         }
         return actions;
     }

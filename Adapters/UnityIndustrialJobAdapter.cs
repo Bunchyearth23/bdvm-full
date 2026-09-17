@@ -138,8 +138,18 @@ internal static class UnityIndustrialJobAdapter
         StationId = contract.OriginFacilityId,
         CargoId = contract.CargoId,
         DisplayReward = checked(contract.BaseReward + contract.ScarcityBonus),
-        DisplayName = Main.IndustrialContractDisplayName(snapshot, contract)
+        DisplayName = BookletTitle(contract)
     };
+
+    // The booklet header is narrow; full names remain in Management, while JobId
+    // retains the complete identity used for persistence and reconciliation.
+    private static string BookletTitle(IndustrialContract contract)
+    {
+        string ShortCode(string value) => new string((value ?? "").Where(char.IsLetterOrDigit).Take(4).ToArray()).ToUpperInvariant();
+        var id = contract.ContractId ?? "";
+        return ShortCode(contract.OriginFacilityId) + "-" + ShortCode(contract.DestinationFacilityId) + " " +
+            id.Substring(Math.Max(0, id.Length - 6)).ToUpperInvariant();
+    }
 
     private static TrainCar[] ResolveAssignedCars(VehicleAcquisitionSnapshot snapshot, IndustrialContract contract)
     {

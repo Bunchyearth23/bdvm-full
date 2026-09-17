@@ -59,7 +59,28 @@ internal static class Program
         Require(((string[])steelMill["supportedCargo"]).Contains("Steel") && ((string[])steelMill["supportedCargo"]).Contains("Ore"), "Every warehouse-compatible cargo must remain visible without being misrepresented as an input or output.");
         Require(((string[])factory["stocks"]).Single().Contains("Not tracked"), "A loaded warehouse without BDVM configuration must still be visible.");
         Require(view.Actions.Where(a => a.Area == "industry").SelectMany(a => a.Fields).Where(f => f.Name == "allowedDefinitionIds").All(f => f.Options.SequenceEqual(new[] { "FlatbedEmpty" })), "Locomotives must never be offered as freight wagons.");
-        Console.WriteLine("Management presentation: 21/21 passed"); return 0;
+        var transferSource = Newtonsoft.Json.Linq.JObject.Parse(@"{
+          'authorityActor':'p','companies':[{'companyId':'c','name':'Rail','leaderId':'p','members':['p'],'delegatedPermissions':{}}],
+          'fleet':[{'assetId':'personal','owner':'Player:p','state':'Available'},
+                   {'assetId':'company','owner':'Company:c','state':'Stored'},
+                   {'assetId':'busy','owner':'Company:c','state':'InService'},
+                   {'assetId':'other','owner':'Company:other','state':'Available'}]
+        }");
+        var transfers = RuntimeManagementPort.ProjectSnapshot(transferSource, "transfers");
+        Require((string)transfers.Fleet[0]["ownerType"] == "Player" && (string)transfers.Fleet[1]["ownerType"] == "Company" && (string)transfers.Fleet[1]["owner"] == "Rail", "Fleet must distinguish player and company owners by name.");
+        Require(transfers.Actions.Any(a => a.Payload.TryGetValue("action", out var action) && (string)action == "fleet.transfer" && (string)a.Payload["assetId"] == "personal" && (string)a.Payload["targetKind"] == "Company"), "Personal assets can transfer to the current company.");
+        Require(transfers.Actions.Any(a => a.Payload.TryGetValue("action", out var action) && (string)action == "fleet.transfer" && (string)a.Payload["assetId"] == "company" && (string)a.Payload["targetKind"] == "Player"), "Company leaders can transfer eligible company assets to themselves.");
+        Require(!transfers.Actions.Any(a => a.Payload.TryGetValue("action", out var action) && (string)action == "fleet.transfer" && new[] { "busy", "other" }.Contains((string)a.Payload["assetId"])), "Busy and other-company assets must not expose transfers.");
+        transferSource["companies"]![0]!["leaderId"] = "leader";
+        transfers = RuntimeManagementPort.ProjectSnapshot(transferSource, "member");
+        Require(!transfers.Actions.Any(a => a.Payload.TryGetValue("targetKind", out var kind) && (string)kind == "Player"), "Ordinary membership cannot extract company assets.");
+        transferSource["companies"]![0]!["delegatedPermissions"]!["p"] = new Newtonsoft.Json.Linq.JArray("ManageFleet");
+        transfers = RuntimeManagementPort.ProjectSnapshot(transferSource, "delegate");
+        Require(transfers.Actions.Any(a => a.Payload.TryGetValue("targetKind", out var kind) && (string)kind == "Player"), "ManageFleet delegates can transfer eligible company assets.");
+        transferSource["companies"]![0]!["liquidating"] = true;
+        transfers = RuntimeManagementPort.ProjectSnapshot(transferSource, "liquidating");
+        Require(!transfers.Actions.Any(a => a.Payload.TryGetValue("action", out var action) && (string)action == "fleet.transfer"), "Liquidating companies expose no transfers.");
+        Console.WriteLine("Management presentation: 28/28 passed"); return 0;
     }
     static void Require(bool condition, string message) { if (!condition) throw new Exception(message); }
 }

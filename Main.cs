@@ -981,6 +981,11 @@ public static class Main
         }
         if (runtimeSettings.EnableWalletBridge)
             TrySynchronizeHostWallet(entry, "world-load");
+        if (runtimeSettings.EnableWalletBridge)
+        {
+            var recovered = IndustrialWalletRecovery.RestoreErasedCredits(runtimeStateProvider.Current!.Economy, player.PlayerId);
+            if (recovered > 0) { runtimeStateProvider.MarkStateChanged(); SynchronizeHostWallet("industrial-recovery"); entry.Logger.Log("[event=industrial-wallet-recovered] amount=" + recovered); }
+        }
         EnsureSelfShuntIndustrialLifecycle(entry);
         EnsurePlayableEconomy(runtimeStateProvider.Current!, runtimeStateProvider.Current!.LeaseClock.ActiveTick);
         SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance);
@@ -996,7 +1001,8 @@ public static class Main
         if (!runtimeSettings.EnableIndustrialPilot || runtimeStateProvider?.Current == null || runtimeRoleDetector == null || selfShuntIndustrialLifecycle != null) return;
         var sink = new UnitySelfShuntIndustrialSink(runtimeStateProvider, runtimeRoleDetector,
             () => SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance),
-            message => entry.Logger.Log("[correlation=selfshunt-industrial] " + message));
+            message => entry.Logger.Log("[correlation=selfshunt-industrial] " + message),
+            playerId => { if (!runtimeSettings.EnableWalletBridge) return; if (playerId == runtimeStateProvider.LocalPlayerId) SynchronizeHostWallet("industrial-settlement"); else SynchronizeRemotePlayerWallet(playerId, Guid.NewGuid().ToString("N")); });
         selfShuntIndustrialLifecycle = new SelfShuntIndustrialLifecycleAdapter(SelfShunt.SelfShuntApi.Instance, sink,
             message => entry.Logger.Log("[correlation=selfshunt-industrial] " + message));
         entry.Logger.Log("[correlation=selfshunt-industrial] [event=lifecycle-subscribed] api=" + SelfShunt.SelfShuntApi.Instance.ApiVersion + ", host=" + SelfShunt.SelfShuntApi.Instance.IsHost + ", externalAuthority=" + SelfShunt.SelfShuntApi.Instance.IsExternalEconomicAuthority);
@@ -1024,20 +1030,41 @@ public static class Main
         }
     }
 
+    private static void SynchronizeHostWallet(string source)
+    {
+        var provider = runtimeStateProvider ?? throw new InvalidOperationException("Wallet provider unavailable.");
+        var playerId = provider.LocalPlayerId!;
+        var actual = hostWallet.ReadBalance();
+        var economy = provider.Current!.Economy;
+        var wallet = economy.Wallets.Single(value => value.Account.Kind == AccountKind.Player && value.Account.OwnerId == playerId);
+        var mirror = economy.ExternalWalletMirrors.SingleOrDefault(value => value.PlayerId == playerId);
+        if (wallet.Balance == actual && mirror?.LastSynchronizedBalance == actual) return;
+        var operation = Guid.NewGuid().ToString("N");
+        var plan = provider.PlanExternalWalletMirror(playerId, actual, operation);
+        if (plan.Action == ExternalWalletMirrorAction.Conflict) throw new InvalidOperationException("Both wallet balances changed; reconciliation required.");
+        if (plan.Action == ExternalWalletMirrorAction.ImportExternal)
+            provider.SynchronizeLocalWallet("wallet-import:" + operation, actual, source);
+        else if (plan.Action == ExternalWalletMirrorAction.CreditExternal || plan.Action == ExternalWalletMirrorAction.DebitExternal)
+        {
+            // Stage the domain change before touching the native wallet. A retry observes
+            // matching balances and completes the mirror without paying a second time.
+            if (!SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance)) throw new InvalidOperationException("Wallet change could not be staged.");
+            if (plan.Action == ExternalWalletMirrorAction.CreditExternal) hostWallet.Credit(plan.Amount);
+            else if (!hostWallet.TryDebit(plan.Amount)) throw new InvalidOperationException("Wallet debit refused.");
+        }
+        var observed = hostWallet.ReadBalance();
+        provider.CompleteExternalWalletMirror(playerId, observed, operation);
+        if (!SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance)) throw new InvalidOperationException("Wallet receipt could not be staged.");
+        mod?.Logger.Log("[event=host-wallet-reconciled] source=" + source + ", action=" + plan.Action + ", amount=" + plan.Amount + ", balance=" + observed);
+    }
+
     private static void TrySynchronizeHostWallet(UnityModManager.ModEntry entry, string source)
     {
         if (runtimeStateProvider?.Current == null) return;
         try
         {
-            var playerId = runtimeStateProvider.LocalPlayerId!;
-            var actual = hostWallet.ReadBalance();
-            var wallet = runtimeStateProvider.Current.Economy.Wallets.SingleOrDefault(x => x.Account.Kind == AccountKind.Player && x.Account.OwnerId == playerId);
-            if (wallet != null && wallet.Balance == actual) return;
-            var correlation = Guid.NewGuid().ToString("N");
-            var result = runtimeStateProvider.SynchronizeLocalWallet("wallet-sync:" + correlation, actual, source);
-            if (!SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance))
-                throw new InvalidOperationException("Wallet synchronization could not be staged for save.");
-            entry.Logger.Log("[correlation=" + correlation + "] [event=wallet-sync] source=" + source + ", balance=" + actual + ", state=" + result.State + ", result=" + result.ResultCode);
+            SynchronizeHostWallet(source);
+
         }
         catch (Exception exception)
         {
@@ -3598,9 +3625,11 @@ public static class Main
             {
                 var id = definition.ExistingDefinitionId!;
                 var kind = FleetVehicleClassifier.Classify(definition.Type, id);
-                if (kind == FleetVehicleKind.Unknown || snapshot.Market.Catalog.Any(value => value.DefinitionId == id)) continue;
-                var price = kind == FleetVehicleKind.Locomotive ? (id == "LocoDE2" ? 40000L : 150000L) : kind == FleetVehicleKind.PassengerCar ? 20000L : 10000L;
-                runtimeStateProvider!.ConfigureFiniteMarketDefinition(id, kind.ToString(), price, 0, 0.8m, 1.2m, 0.5m, depot.TrackId, 3);
+                if (kind == FleetVehicleKind.Unknown) continue;
+                var existingCatalog = snapshot.Market.Catalog.SingleOrDefault(value => value.DefinitionId == id);
+                if (existingCatalog != null) { GameplayCatalogPrices.UpgradeLegacyDefault(snapshot.Market, existingCatalog, kind); continue; }
+                var price = GameplayCatalogPrices.BasePrice(id, kind);
+                runtimeStateProvider!.ConfigureFiniteMarketDefinition(id, kind.ToString(), price, 0, 0.9m, 1.1m, 0.5m, depot.TrackId, 3);
             }
           }
         }
@@ -3936,9 +3965,13 @@ public static class Main
             var snapshot = runtimeStateProvider!.Current!;
             var player = snapshot.Economy.Players.Single(value => value.PlayerId == actorId);
             var companyId = player.CompanyId ?? throw new InvalidOperationException("Company membership is required.");
+            var targetKind = (string?)body["targetKind"] ?? "Company";
+            var targetOwner = targetKind == "Company" ? AssetOwnerRef.Company(companyId)
+                : targetKind == "Player" ? AssetOwnerRef.Player(actorId)
+                : throw new ArgumentException("Invalid transfer target.");
             var record = runtimeStateProvider.ManageFleetFor("remote-fleet-transfer:" + correlation, actorId, assetId,
-                FleetCommandAction.TransferOwnership, runtimeRoleDetector!, target: AssetOwnerRef.Company(companyId));
-            result = new { action, record.Outcome, record.ResultCode, record.AssetId, record.FleetVersionAfter, target = AssetOwnerRef.Company(companyId).Key };
+                FleetCommandAction.TransferOwnership, runtimeRoleDetector!, target: targetOwner);
+            result = new { action, record.Outcome, record.ResultCode, record.AssetId, record.FleetVersionAfter, target = targetOwner.Key };
         }
         else if (action == "company.create")
         {
@@ -4513,13 +4546,19 @@ public static class Main
                         ?? throw new InvalidOperationException("The origin company does not support that cargo.");
                     var destinationStock = snapshot.IndustrialStocks.SingleOrDefault(value => value.FacilityId == destination && value.CargoId == cargoId)
                         ?? throw new InvalidOperationException("The destination company does not support that cargo.");
-                    policyId = "manual-transport:" + origin + ":" + destination + ":" + cargoId;
+                    policyId = "manual-transport-v2:" + origin + ":" + destination + ":" + cargoId;
                     if (!snapshot.IndustrialTransportPolicies.Any(value => value.PolicyId == policyId))
                     {
                         var batchQuantity = Math.Max(1m, Math.Min(source.Capacity, destinationStock.Capacity));
+                        var originStation = StationController.GetStationByYardID(origin) ?? throw new InvalidOperationException("Origin station unavailable.");
+                        var destinationStation = StationController.GetStationByYardID(destination) ?? throw new InvalidOperationException("Destination station unavailable.");
+                        var cargoDefinition = Globals.G.Types.cargos.First(value => value != null && (value.v1.ToString() == cargoId || value.id == cargoId));
+                        var unitReward = IndustrialHaulPricing.PerLoad((decimal)JobPaymentCalculator.GetDistanceBetweenStations(originStation, destinationStation),
+                            (decimal)cargoDefinition.fullDamagePrice, (decimal)cargoDefinition.environmentDamagePrice, (decimal)cargoDefinition.massPerUnit,
+                            (decimal)cargoDefinition.sensitivityPaymentModifier, (decimal)Globals.G.GameParams.JobPaymentModifier);
                         engine.ConfigureTransportPolicy("remote-industry-manual-policy:" + correlation, policyId, origin, destination, cargoId,
                             batchQuantity, destinationStock.Capacity,
-                            10000, 0, 600, 600, 0,
+                            checked(decimal.ToInt64(decimal.Ceiling(unitReward * batchQuantity))), 0, 600, 600, 0,
                             new WagonRequirement { CargoId = cargoId, MinimumWagonCount = 1, MinimumTotalCapacity = batchQuantity, AllowedDefinitionIds = new List<string>() },
                             true, 3600, 0);
                     }
