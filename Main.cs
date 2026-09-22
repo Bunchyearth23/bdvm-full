@@ -26,7 +26,7 @@ using UnityModManagerNet;
 
 namespace BDVM;
 
-public static class Main
+public static partial class Main
 {
     private static class RuntimePerformance
     {
@@ -362,6 +362,7 @@ public static class Main
         if (runtimeSettings.EnableSaveGameDataHook)
         {
             runtimeStateProvider = new AcquisitionRuntimeStateProvider();
+            UnityCompanyRollingStockAccess.Configure(runtimeStateProvider, roleDetector, () => System.Threading.Volatile.Read(ref economicWorkerGeneration));
             var handler = new HostSaveGameUpdateHandler(runtimeStateProvider, message => modEntry.Logger.Log("[correlation=save-runtime] " + message),
                 Path.Combine(modEntry.Path, "persistent-journal"), (message, exception) => modEntry.Logger.Error("[correlation=persistent-journal] " + message + " " + exception));
             SaveGameRuntimeHook.Configure(
@@ -541,7 +542,9 @@ public static class Main
         var host = GameObject.Find("BDVM.InGameWindow") ?? new GameObject("BDVM.InGameWindow");
         UnityEngine.Object.DontDestroyOnLoad(host);
         inGameWindow = host.GetComponent<InGameCompanyWindow>() ?? host.AddComponent<InGameCompanyWindow>();
-        inGameWindow.Configure(() => DrawCompanyPanel(entry), () => status, message => entry.Logger.Log(message));
+        managementPanel = new InGameManagementPanel(ReadInGameManagement, ExecuteInGameManagement, PollInGameManagement, InGameContext);
+        inGameWindow.Configure(managementPanel.Draw, () => managementPanel.Status, message => entry.Logger.Log(message),
+            managementPanel.SetActive, managementPanel.Tick);
         entry.Logger.Log("[correlation=ingame-ui] [event=ui-ready] toggle=F7, persistentButton=true");
     }
 
@@ -561,11 +564,16 @@ public static class Main
                 if (!SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance))
                     throw new InvalidOperationException("Could not stage multiplayer economy state in SaveGameData.");
             },
-            message => mod?.Logger.Log(message), runtimeSettings.StarterBundleDefinitionIds, new FullModuleIntentExecutor(), runtimeSettings.StartingPersonalBalance);
+            message => mod?.Logger.Log(message), runtimeSettings.StarterBundleDefinitionIds, new FullModuleIntentExecutor(), runtimeSettings.StartingPersonalBalance,
+            playerId => (multiplayerWallet ?? throw new InvalidOperationException("Persistent Multiplayer wallet unavailable."))
+                .EnsureAndRead(playerId, "starting-capital:" + playerId, runtimeSettings.StartingPersonalBalance));
         serverProtocol = new MultiplayerServerProtocolAdapter(server, new PersistentMultiplayerPeerIdentityResolver(), new CompanyProtocolHost(executor), message => mod?.Logger.Log(message));
         multiplayerWallet = new PersistentMultiplayerWalletAdapter(server);
         server.RegisterSerializablePacket<BDVMSerializablePacket>(serverProtocol.Receive);
+        if (configuredServer != null) configuredServer.OnPlayerReady -= InitializeRemotePersonalWallet;
         configuredServer = server;
+        server.OnPlayerReady += InitializeRemotePersonalWallet;
+        foreach (var player in server.Players.Where(player => player.IsLoaded && !player.IsHost)) InitializeRemotePersonalWallet(player);
         mod?.Logger.Log("[correlation=multiplayer-bootstrap] [event=protocol-registered] side=server, protocol=" + CompanyProtocolLimits.CurrentVersion + ", api=" + MultiplayerAPI.LoadedApiVersion);
     }
 
@@ -634,7 +642,14 @@ public static class Main
         mod?.Logger.Log("[correlation=multiplayer-bootstrap] [event=protocol-registered] side=client, protocol=" + CompanyProtocolLimits.CurrentVersion + ", api=" + MultiplayerAPI.LoadedApiVersion);
     }
 
-    private static void ClearMultiplayerServer() { configuredServer = null; serverProtocol = null; multiplayerWallet = null; }
+    private static void InitializeRemotePersonalWallet(IPlayer player)
+    {
+        if (player.IsHost || runtimeStateProvider?.Current == null || !(player is IPersistentPlayerIdentity identity) || identity.PersistentId == Guid.Empty) return;
+        try { SynchronizeRemotePlayerWallet(PlayerIdentity.FromMultiplayerGuid(identity.PersistentId), "player-ready:" + Guid.NewGuid().ToString("N")); }
+        catch (Exception ex) { mod?.Logger.Error("[event=individual-wallet-initialization-failed] " + ex); }
+    }
+
+    private static void ClearMultiplayerServer() { if (configuredServer != null) configuredServer.OnPlayerReady -= InitializeRemotePersonalWallet; configuredServer = null; serverProtocol = null; multiplayerWallet = null; }
     private static void ClearMultiplayerClient() { configuredClient = null; clientProtocol = null; clientRequestTracker = null; lock (clientStateGate) { clientProtocolResults.Clear(); clientProtocolResultOrder.Clear(); clientAuthoritativeState = null; clientStateReceivedAt = default; clientStateTransferPending = false; clientStateRequestId = null; clientStateAssembler.Reset(); } }
 
     private static void OnWorldLoadingFinished()
@@ -972,13 +987,7 @@ public static class Main
             return;
         }
         var legacyBalance = runtimeSettings.EnableWalletBridge ? hostWallet.ReadBalance() : 0;
-        var player = runtimeStateProvider.EnsureLocalPlayer(legacyBalance);
-        var starterDefinitions = runtimeSettings.StarterBundleDefinitionIds ?? new List<string>();
-        if (starterDefinitions.Count > 0)
-        {
-            var starter = runtimeStateProvider.GrantLocalStarterBundle("starter-bundle:" + player.PlayerId, starterDefinitions, runtimeRoleDetector!);
-            entry.Logger.Log("[correlation=runtime-bootstrap] [event=starter-bundle] player=" + player.PlayerId + ", firstGrant=" + starter.GrantId + ", deliveryMode=one-vehicle-per-radio-placement, components=" + string.Join(",", starterDefinitions) + ", state=" + starter.State);
-        }
+        var player = runtimeStateProvider.EnsureStartingPlayer(runtimeStateProvider.LocalPlayerId!, runtimeSettings.StartingPersonalBalance, legacyBalance);
         if (runtimeSettings.EnableWalletBridge)
             TrySynchronizeHostWallet(entry, "world-load");
         if (runtimeSettings.EnableWalletBridge)
@@ -990,8 +999,8 @@ public static class Main
         EnsurePlayableEconomy(runtimeStateProvider.Current!, runtimeStateProvider.Current!.LeaseClock.ActiveTick);
         SaveGameRuntimeHook.TryOnUpdateInternalData(SaveGameManager.Instance);
         status = "BDVM 0.3.0 beta ready for " + player.PlayerId + ".";
-        entry.Logger.Log("[correlation=runtime-bootstrap] Runtime state ready; player=" + player.PlayerId + ", legacyBalancePolicy=host-keeps-existing-balance, walletBridge=" + runtimeSettings.EnableWalletBridge + ", transfers=" + runtimeSettings.EnableCompanyTransfers + ", acquisition=" + runtimeSettings.EnableVehicleAcquisition + ".");
-        entry.Logger.Log("[correlation=wallet-migration] [event=wallet-migration-policy] policy=host-keeps-existing-balance-v1, player=" + player.PlayerId + ", observedVanillaBalance=" + legacyBalance + ", remotePlayerInitialBalance=0");
+        entry.Logger.Log("[correlation=runtime-bootstrap] Runtime state ready; player=" + player.PlayerId + ", startingBalancePolicy=one-time-capital, walletBridge=" + runtimeSettings.EnableWalletBridge + ", transfers=" + runtimeSettings.EnableCompanyTransfers + ", acquisition=" + runtimeSettings.EnableVehicleAcquisition + ".");
+        entry.Logger.Log("[correlation=wallet-migration] [event=wallet-migration-policy] policy=one-time-capital-v1, player=" + player.PlayerId + ", observedVanillaBalance=" + legacyBalance + ", configuredStartingBalance=" + runtimeSettings.StartingPersonalBalance);
         if (runtimeSettings.VerboseLogging)
             entry.Logger.Log("[correlation=runtime-bootstrap] [event=state-summary] players=" + runtimeStateProvider.Current!.Economy.Players.Count + ", companies=" + runtimeStateProvider.Current.Economy.Companies.Count + ", wallets=" + runtimeStateProvider.Current.Economy.Wallets.Count + ", assets=" + runtimeStateProvider.Current.Assets.Assets.Count + ", offers=" + runtimeStateProvider.Current.Offers.Count);
     }
@@ -1072,7 +1081,11 @@ public static class Main
         }
     }
 
-    private static void OnGui(UnityModManager.ModEntry entry) => DrawCompanyPanel(entry);
+    private static void OnGui(UnityModManager.ModEntry entry)
+    {
+        GUILayout.Label("Open Management with F7 while in mouse mode.");
+        if (GUILayout.Button("Open Management")) inGameWindow?.Open();
+    }
 
     private static void DrawCompanyPanel(UnityModManager.ModEntry entry)
     {
@@ -1705,7 +1718,7 @@ public static class Main
         var delivered = snapshot.InitialDeliveries
             .Where(value => value.State == InitialDeliveryState.Delivered && !string.IsNullOrWhiteSpace(value.TargetTrackId) && value.TargetKind.HasValue)
             .Select(value => new InitialDeliveryTrackRule { TrackId = value.TargetTrackId!, Kind = value.TargetKind!.Value });
-        return configured.Concat(delivered)
+        return configured.Concat(delivered).Concat(DiscoveredDeliveryTracks())
             .GroupBy(value => value.TrackId.Trim(), StringComparer.Ordinal)
             .Select(group => new InitialDeliveryTrackRule { TrackId = group.Key, Kind = group.First().Kind })
             .OrderBy(value => value.TrackId, StringComparer.Ordinal).ToArray();
@@ -3263,7 +3276,7 @@ public static class Main
             var localPlayerId = runtimeStateProvider?.LocalPlayerId;
             if (string.IsNullOrWhiteSpace(localPlayerId)) throw new UnauthorizedAccessException("The local economic player is unavailable.");
             if (!snapshot.Economy.Players.Any(value => value.PlayerId == localPlayerId))
-                runtimeStateProvider!.EnsurePersistentPlayer(localPlayerId!, 0);
+                runtimeStateProvider!.EnsureStartingPlayer(localPlayerId!, runtimeSettings.StartingPersonalBalance, hostWallet.ReadBalance());
             return localPlayerId!;
         }
         var connected = new List<AuthenticatedTransportActor>();
@@ -3277,7 +3290,9 @@ public static class Main
         var actorId = AuthenticatedActorRouting.Resolve(transportIdentity, runtimeStateProvider?.LocalPlayerId,
             snapshot.Economy.Players.Select(value => value.PlayerId), connected);
         if (!snapshot.Economy.Players.Any(value => value.PlayerId == actorId))
-            runtimeStateProvider!.EnsurePersistentPlayer(actorId, 0);
+            runtimeStateProvider!.EnsureStartingPlayer(actorId, runtimeSettings.StartingPersonalBalance,
+                (multiplayerWallet ?? throw new InvalidOperationException("Persistent Multiplayer wallet unavailable."))
+                    .EnsureAndRead(actorId, "starting-capital:" + actorId, runtimeSettings.StartingPersonalBalance));
         return actorId;
     }
 
@@ -3483,6 +3498,7 @@ public static class Main
         {
             schema = "bdvm.remote-dispatch", schemaVersion = 2, release = "0.3.0-beta", transportIdentity, authorityActor = playerId,
             supportedIntents = new[] { "fleet.set-tag", "fleet.set-dispatch-state", "fleet.set-state", "fleet.rename", "fleet.transfer", "fleet.bundle", "fleet.resale", "fleet.maintenance", "company.create", "company.apply", "company.invite", "company.decide-application", "company.respond-invitation", "company.leave", "company.policy", "company.permission", "company.transfer-leadership", "company.dissolve", "wallet.transfer", "market.configure", "market.generate-order", "market.purchase", "initial-delivery.place", "initial-delivery.reconcile", "assignment.cancel", "assignment.manage", "finance.manage", "yard.manage", "industry.manage" },
+            playerChoices = configuredServer?.Players.Select(peer => new { id = MultiplayerPlayerIdentityAdapter.RequirePersistentPlayerId(peer), name = peer.Username }).ToArray(),
             wallets = snapshot.Economy.Wallets.Where(x => visibility.CanView(x.Account)).Select(x => new { account = x.Account.Key, x.Balance, x.Version }),
             walletMirror = snapshot.Economy.ExternalWalletMirrors.Where(x => visibility.IsPlayer(x.PlayerId)).Select(x => new { x.PlayerId, x.LastSynchronizedBalance, x.LastOperationId, x.Version }),
             companies = snapshot.Economy.Companies.Select(x => new { x.CompanyId, x.Name, x.LeaderId, members = visibility.IsCompany(x.CompanyId) ? x.Members.ToArray() : Array.Empty<string>(), delegatedPermissions = visibility.IsCompany(x.CompanyId) ? x.DelegatedPermissions.ToDictionary(p => p.Key, p => p.Value.Select(v => v.ToString()).ToArray()) : new Dictionary<string, string[]>(), x.MembershipPolicy, x.Liquidating, x.Version }),
@@ -3613,7 +3629,7 @@ public static class Main
         }
         }
 
-        if (bootstrap)
+        if (bootstrap || snapshot.Market.Catalog.Count == 0)
         {
           var depot = LeaseReturnTrackRules(snapshot).OrderBy(value => value.TrackId, StringComparer.Ordinal).FirstOrDefault();
           if (depot != null)
@@ -3718,6 +3734,7 @@ public static class Main
     {
         var adapter = multiplayerWallet ?? throw new InvalidOperationException("The persistent Multiplayer wallet capability is unavailable.");
         var external = adapter.EnsureAndRead(actorId, correlation, runtimeSettings.StartingPersonalBalance);
+        runtimeStateProvider!.EnsureStartingPlayer(actorId, runtimeSettings.StartingPersonalBalance, external);
         var economy = runtimeStateProvider!.Current!.Economy;
         var observedWallet = economy.Wallets.SingleOrDefault(value => value.Account.Kind == AccountKind.Player && value.Account.OwnerId == actorId);
         var observedMirror = economy.ExternalWalletMirrors.SingleOrDefault(value => value.PlayerId == actorId);

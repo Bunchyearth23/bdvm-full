@@ -6,7 +6,7 @@ internal static class Program
 {
     static int Main()
     {
-        SnapshotChecks.Run();
+        SnapshotChecks.Run(); InGameManagementChecks.Run(); InGamePanelChecks.Run();
         var port = new RuntimeManagementPort(_ => @"{
           'authorityActor':'local-player',
           'companies':[{'companyId':'co','name':'Rail Company','leaderId':'local-player','members':['local-player']}],

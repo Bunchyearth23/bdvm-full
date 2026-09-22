@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -56,6 +56,7 @@ internal static class Program
 
     private static void Main()
     {
+        Run(CompanyRollingStockAccessChecks.Run);
         Run(TestIndustrialWalletRecovery);
         Run(TestGameplayPricing);
         Run(TestNetworkRoleMatrix);
@@ -125,6 +126,7 @@ internal static class Program
         Run(TestCareerIdentityFallsBackToCurrentSessionMetadata);
         Run(TestSavePayloadFactoryReceivesResolvedCheckpointAndExistingPayload);
         Run(TestRuntimeSettingsFailClosed);
+        Run(TestStartingCapital);
         Run(TestVerticalSliceCreatesOnePersistentZeroBalanceCompany);
         Run(TestRuntimeWalletMigrationSynchronizationAndCompanyTransfers);
         Run(TestExternalWalletMirrorReconcilesOneSidedChangesAndRefusesConflicts);
@@ -736,6 +738,52 @@ internal static class Program
             "payload factory receives the resolved checkpoint and preserves explicit access to existing state before replacement");
     }
 
+    private static void TestStartingCapital()
+    {
+        var settings = RuntimeSaveSettings.SafeDefaults();
+        Check(settings.StartingPersonalBalance == 125000 && settings.StarterBundleDefinitionIds.Count == 0, "new defaults grant cash without rolling stock");
+        var path = System.IO.Path.GetTempFileName();
+        try
+        {
+            System.IO.File.WriteAllText(path, "{\"startingPersonalBalance\":2000,\"starterBundleDefinitionIds\":[\"LocoDE2\",\"FlatbedEmpty\",\"FlatbedEmpty\",\"FlatbedEmpty\"]}");
+            var legacy = RuntimeSaveSettings.Load(path);
+            Check(legacy.StartingPersonalBalance == 125000 && legacy.StarterBundleDefinitionIds.Count == 0, "installed legacy starter settings upgrade to cash only");
+            System.IO.File.WriteAllText(path, "{\"startingPersonalBalance\":90000}");
+            Check(RuntimeSaveSettings.Load(path).StartingPersonalBalance == 90000, "custom starting balance remains configurable");
+        }
+        finally { System.IO.File.Delete(path); }
+        var provider = new AcquisitionRuntimeStateProvider();
+        provider.Provide("capital", null);
+        var id = provider.LocalPlayerId!;
+        provider.EnsureStartingPlayer(id, 125000, 2000);
+        var plan = provider.PlanExternalWalletMirror(id, 2000, "initial");
+        Check(plan.Action == ExternalWalletMirrorAction.CreditExternal && plan.Amount == 123000, "native wallet receives the difference to 125000, not an extra grant");
+        Check(provider.PlanExternalWalletMirror(id, 125000, "retry").Action == ExternalWalletMirrorAction.None, "retry after native credit does not pay twice");
+        provider.CompleteExternalWalletMirror(id, 125000, "paid");
+        provider.SynchronizeWalletFor("spend", id, 100000, "test");
+        provider.EnsureStartingPlayer(id, 125000, 100000);
+        provider.EnsureStartingPlayer("remote", 125000);
+        provider.EnsureStartingPlayer("remote", 125000);
+        provider.CreateCompanyFor("company", id, "Capital Rail");
+        var restored = new AcquisitionRuntimeStateProvider();
+        restored.Provide("capital", provider.CapturePayload());
+        restored.EnsureStartingPlayer(id, 125000, 100000);
+        restored.EnsureStartingPlayer("remote", 125000);
+        var state = restored.Current!;
+        Check(state.Economy.Wallets.Single(w => w.Account.Key == AccountRef.Player(id).Key).Balance == 100000 &&
+              state.Economy.Wallets.Single(w => w.Account.Key == AccountRef.Player("remote").Key).Balance == 125000 &&
+              state.Economy.Wallets.Single(w => w.Account.Kind == AccountKind.Company).Balance == 0,
+              "reload and repeated player initialization preserve spent capital, remote capital and zero company balance");
+        Check(state.Assets.Assets.Count == 0 && state.InitialDeliveries.Count == 0 && state.Economy.History.Count(h => h.Kind == "starting-capital-granted") == 2,
+              "one persistent receipt per player and no starter vehicles or deliveries");
+        restored.EnsurePersistentPlayer("legacy", 2300);
+        restored.EnsureStartingPlayer("legacy", 125000);
+        Check(state.Economy.Wallets.Single(w => w.Account.Key == AccountRef.Player("legacy").Key).Balance == 2300, "existing players do not receive retroactive capital");
+        var newCareer = new AcquisitionRuntimeStateProvider();
+        newCareer.Provide("other-career", null);
+        newCareer.EnsureStartingPlayer("remote", 125000);
+        Check(newCareer.Current!.Economy.Wallets.Single().Balance == 125000, "another career grants its own initial capital");
+    }
     private static void TestRuntimeSettingsFailClosed()
     {
         var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "bdvm-runtime-settings-" + Guid.NewGuid().ToString("N") + ".json");
@@ -744,8 +792,8 @@ internal static class Program
         System.IO.File.WriteAllText(path, "{");
         Check(!RuntimeSaveSettings.Load(path, _ => warnings++).EnableSaveGameDataHook && warnings == 1, "invalid runtime settings fail closed with one warning");
         System.IO.File.WriteAllText(path, "{\"enableSaveGameDataHook\":true}");
-        Check(RuntimeSaveSettings.Load(path).EnableSaveGameDataHook && RuntimeSaveSettings.Load(path).StartingPersonalBalance == 0,
-            "older explicit runtime settings remain compatible and do not invent a balance field");
+        Check(RuntimeSaveSettings.Load(path).EnableSaveGameDataHook && RuntimeSaveSettings.Load(path).StartingPersonalBalance == 125000,
+            "older runtime settings without a balance use the new starting capital");
         System.IO.File.WriteAllText(path, "{\"enableSaveGameDataHook\":true,\"startingPersonalBalance\":-1}");
         Check(!RuntimeSaveSettings.Load(path, _ => warnings++).EnableSaveGameDataHook && warnings == 2,
             "an invalid configured starting balance fails closed");
@@ -2220,7 +2268,7 @@ internal static class Program
         var warnings = 0;
         var settings = RuntimeSaveSettings.Load(path, _ => warnings++);
         Check(warnings == 0, "validation runtime settings deserialize without fallback");
-        Check(settings.EnableSaveGameDataHook && settings.EnableWalletBridge && settings.StartingPersonalBalance == 2000,
+        Check(settings.EnableSaveGameDataHook && settings.EnableWalletBridge && settings.StartingPersonalBalance == 125000 && settings.StarterBundleDefinitionIds.Count == 0,
             "validation runtime settings retain enabled runtime hooks and the configured one-time player grant");
         WorldPopulationPolicyEngine.Validate(settings.WorldPopulationPolicy);
         Check(settings.WorldPopulationPolicy.Rules.Any(rule => rule.Source == WorldPopulationSource.PurchasedDelivery && rule.Allow), "validation runtime settings preserve purchased delivery policy");

@@ -23,8 +23,8 @@
   "enableFinancing": true,
   "enableTriageAssistance": true,
   "initialDeliveryTracks": [],
-  "starterBundleDefinitionIds": [ "LocoDE2", "FlatbedEmpty", "FlatbedEmpty", "FlatbedEmpty" ],
-  "startingPersonalBalance": 2000,
+  "starterBundleDefinitionIds": [],
+  "startingPersonalBalance": 125000,
   "enableStrictWorldPopulation": true,
   "worldPopulationPolicy": {
     "schemaVersion": 1,

@@ -8,6 +8,8 @@ public sealed class InGameCompanyWindow : MonoBehaviour
 {
     private const int WindowId = 0x445643;
     private Action? drawContents;
+    private Action<bool>? activity;
+    private Action? tick;
     private Func<string>? getStatus;
     private Action<string>? log;
     private Rect windowRect = new Rect(30f, 60f, 1100f, 760f);
@@ -17,16 +19,18 @@ public sealed class InGameCompanyWindow : MonoBehaviour
     private bool visible;
     private bool worldInputBlocked;
 
-    public void Configure(Action contents, Func<string> statusProvider, Action<string> logger)
+    public void Configure(Action contents, Func<string> statusProvider, Action<string> logger, Action<bool>? activityChanged = null, Action? update = null)
     {
         drawContents = contents ?? throw new ArgumentNullException(nameof(contents));
         getStatus = statusProvider ?? throw new ArgumentNullException(nameof(statusProvider));
-        log = logger;
+        log = logger; activity = activityChanged; tick = update;
     }
 
     private void Update()
     {
         var mouseMode = IsMouseMode();
+        activity?.Invoke(visible && mouseMode);
+        tick?.Invoke();
         if (!mouseMode && worldInputBlocked) SetWorldInputBlocked(false, "mouse-mode-ended");
         else if (mouseMode && visible && !worldInputBlocked) SetWorldInputBlocked(true, "mouse-mode-resumed");
         if (mouseMode && Input.GetKeyDown(KeyCode.F7)) SetVisible(!visible, "hotkey");
@@ -47,7 +51,7 @@ public sealed class InGameCompanyWindow : MonoBehaviour
         windowRect.x = Mathf.Clamp(windowRect.x, 0f, Math.Max(0f, Screen.width - windowRect.width));
         windowRect.y = Mathf.Clamp(windowRect.y, 0f, Math.Max(0f, Screen.height - windowRect.height));
         EnsureOpaqueWindowStyle();
-        windowRect = GUI.Window(WindowId, windowRect, DrawWindow, "BDVM 0.3.0 beta", opaqueWindowStyle);
+        windowRect = GUI.Window(WindowId, windowRect, DrawWindow, "BDVM - Management", opaqueWindowStyle);
     }
 
     private void EnsureOpaqueWindowStyle()
@@ -108,6 +112,8 @@ public sealed class InGameCompanyWindow : MonoBehaviour
         GUI.color = previous;
     }
 
+    public void Open() => SetVisible(true, "management-button");
+
     private void SetVisible(bool value, string source)
     {
         if (visible == value) return;
@@ -130,6 +136,7 @@ public sealed class InGameCompanyWindow : MonoBehaviour
     {
         if (worldInputBlocked) SetWorldInputBlocked(false, "component-disabled");
         visible = false;
+        activity?.Invoke(false);
     }
 
     private void OnDestroy()

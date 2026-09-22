@@ -277,6 +277,19 @@ internal sealed class BDVMStarterDeliveryRadio : MonoBehaviour, ICommsRadioMode
         }
     }
 
+    internal static IReadOnlyList<InitialDeliveryTrackRule> DiscoverDeliveryTracks()
+    {
+        // Same station-track eligibility as the existing delivery radio. Called once
+        // per world by Management; placement still performs the native preflight.
+        var yards = new HashSet<string>((StationController.allStations ?? Enumerable.Empty<StationController>())
+            .Where(station => station != null && !string.IsNullOrWhiteSpace(station.stationInfo?.YardID))
+            .Select(station => station.stationInfo.YardID), StringComparer.OrdinalIgnoreCase);
+        return (RailTrackRegistry.Instance?.AllTracks ?? Enumerable.Empty<RailTrack>())
+            .Where(track => IsEligible(track, yards))
+            .Select(track => new InitialDeliveryTrackRule { TrackId = track.LogicTrack().ID.FullDisplayID, Kind = Classify(track) })
+            .OrderBy(rule => rule.TrackId, StringComparer.Ordinal).ToArray();
+    }
+
     private static bool IsEligible(RailTrack? track, ISet<string> activeYards)
     {
         if (track?.LogicTrack()?.ID == null) return false;

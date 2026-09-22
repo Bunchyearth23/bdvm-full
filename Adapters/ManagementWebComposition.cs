@@ -200,7 +200,7 @@ internal sealed class RuntimeManagementPort : IManagementAuthoritativePort
     private static string FriendlyLocation(JObject source, string id) => Labels(source["locationChoices"], "id", "name").TryGetValue(id, out var value) ? value : id;
     private static string FriendlyCargo(JObject source, string id) => Labels(source["cargoChoices"], "id", "name").TryGetValue(id, out var value) ? value : id;
 
-    private static string ResolveAction(string intent, string? requested)
+    internal static string ResolveAction(string intent, string? requested)
     {
         if (intent == "bdvm.management.intent.v1" || intent == "bdvm.management.company-governance.v1") return requested ?? "";
         var map = new Dictionary<string, string>(StringComparer.Ordinal)
@@ -300,7 +300,7 @@ internal sealed class RuntimeManagementPort : IManagementAuthoritativePort
             .Where(value => value.TrackId.Length > 0 && (value.Kind == "Depot" || value.Kind == "ServiceTrack"))
             .GroupBy(value => value.TrackId, StringComparer.Ordinal)
             .Select(group => group.First())
-            .Take(32)
+
             .ToArray();
         var deliveryTrackLabels = deliveryTracks.ToDictionary(value => value.TrackId,
             value => (locationLabels.TryGetValue(value.TrackId.Split('-')[0], out var station) ? station + " — " : "") + value.Kind + " " + value.TrackId + " (ID: " + value.TrackId + ")",
