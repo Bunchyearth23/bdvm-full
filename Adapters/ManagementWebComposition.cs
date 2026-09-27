@@ -33,7 +33,7 @@ internal sealed class RuntimeManagementPort : IManagementAuthoritativePort
         {
             Version = HighestVersion(source), CorrelationId = correlationId, FeatureFlags = Features(source),
             Companies = Rows(source["companies"]), Wallets = Rows(source["wallets"]), Fleet = Rows(source["fleet"]),
-            Market = MarketRows(source), Deliveries = Rows(source["initialDeliveries"]),
+            Market = MarketRows(source), Items = Rows(source["itemCatalog"]), Deliveries = Rows(source["initialDeliveries"]),
             Leases = Array.Empty<IReadOnlyDictionary<string, object>>(),
             Assignments = Rows(source["assignments"]),
             Financing = Rows(source["financing"]?["contracts"], source["financing"]?["pools"]),
@@ -354,6 +354,16 @@ internal sealed class RuntimeManagementPort : IManagementAuthoritativePort
             actions.Add(Action("market", "Publish offer for " + definitionId + " at " + locationId, "bdvm.management.intent.v1",
                 new Dictionary<string, object> { ["action"] = "market.generate-order", ["definitionId"] = definitionId, ["locationId"] = locationId },
                 "This consumes one unit of finite stock and publishes a time-limited purchase offer."));
+        }
+
+        foreach (var item in source["itemCatalog"] as JArray ?? new JArray())
+        {
+            if ((bool?)source["itemShopAvailable"] != true) break;
+            var id = (string?)item["id"] ?? "";
+            if (id.Length == 0 || (int?)item["stock"] <= 0) continue;
+            actions.Add(Action("items", "Buy " + ((string?)item["name"] ?? id) + " — $" + ((double?)item["price"] ?? 0).ToString("N0"),
+                "bdvm.management.intent.v1", new Dictionary<string, object> { ["action"] = "item-shop.purchase", ["itemId"] = id },
+                "Purchase at the game catalog price and deliver directly to your inventory."));
         }
 
         foreach (var listing in source["market"] as JArray ?? new JArray())

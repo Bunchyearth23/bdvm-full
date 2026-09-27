@@ -306,6 +306,14 @@ public static partial class Main
     public static bool Load(UnityModManager.ModEntry modEntry)
     {
         mod = modEntry;
+        try
+        {
+            UnityStarterEquipment.Install(new Harmony(modEntry.Info.Id + ".StarterEquipment"), message => modEntry.Logger.Log(message));
+        }
+        catch (Exception exception)
+        {
+            modEntry.Logger.Error("[correlation=starter-equipment] Solo starting inventory hook could not be installed: " + exception);
+        }
         // A reload must not let a worker belonging to the previous runtime
         // publish into the newly initialized career state.
         ResetEconomicWorker();
@@ -402,7 +410,8 @@ public static partial class Main
         var dispatch = managementWebModules.Load(new BDVM.Dispatch.DispatchWebModule());
         var loaded = managementWebModules.Load(new ManagementWebModule());
         managementWebSessions = new WebSessionRegistry();
-        managementWebIntents = new WebIntentGateway(managementWebModules, managementWebSessions, new ManagementAuthoritativeWebIntentExecutor(port));
+        managementWebIntents = new WebIntentGateway(managementWebModules, managementWebSessions, new ManagementAuthoritativeWebIntentExecutor(port),
+            onExecutionFailure: (correlation, exception) => entry.Logger.Error($"[correlation={correlation}] [event=management-intent-executor-failed] {exception}"));
         managementWebTransportSessions.Clear();
         RemoteDispatchBridge.ConfigureWeb(BuildManagementWebShell, BuildManagementWebSnapshot, HandleManagementWebIntent, ReadManagementWebAsset);
         RemoteDispatchBridge.ConfigureTrustedWebTransport(BuildManagementWebShell, BuildManagementWebSnapshot, HandleManagementWebIntent, ReadManagementWebAsset);
@@ -3507,6 +3516,8 @@ public static partial class Main
             market = snapshot.Market.Listings.Select(x => new { displayName = FriendlyIdentifier(x.DefinitionId), x.ListingId, kind = x.Kind.ToString(), state = x.State.ToString(), x.AssetId, x.DefinitionId, locationName = FriendlyLocationName((x.LocationId ?? "").Split('-')[0]), x.LocationId, x.Price, x.ExpiresTick, x.Version }),
             catalog = snapshot.Market.Catalog.Select(x => new { displayName = FriendlyIdentifier(x.DefinitionId), x.DefinitionId, x.CategoryId, x.BasePrice, x.TransferFee, x.BuybackRate, x.Version }),
             catalogCandidates,
+            itemShopAvailable = string.Equals(playerId, runtimeStateProvider!.LocalPlayerId, StringComparison.Ordinal),
+            itemCatalog = UnityNativeItemShop.ReadCatalog().Select(item => new { item.Id, item.Name, item.Price, item.Stock }),
             locationChoices,
             cargoChoices,
             rollingStockTags,
@@ -4170,6 +4181,12 @@ public static partial class Main
                 }
                 result = new { action, record.State, record.ResultCode, record.ListingId, record.AssetId, record.DeliveryOperationId };
             }
+        }
+        else if (action == "item-shop.purchase")
+        {
+            var itemId = (string?)body["itemId"] ?? "";
+            UnityNativeItemShop.Purchase(itemId, actorId, runtimeStateProvider!.LocalPlayerId ?? throw new InvalidOperationException("The local player identity is unavailable."), correlation);
+            result = new { action, itemId, state = "DeliveredToInventory" };
         }
         else if (action == "initial-delivery.place")
         {

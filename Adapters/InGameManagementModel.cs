@@ -22,7 +22,7 @@ internal sealed class InGameManagementView
 
 internal static class InGameManagementModel
 {
-    private static readonly string[] BasicAreas = { "wallets", "companies", "market", "fleet", "deliveries", "industry", "contracts", "assignments", "maintenance" };
+    private static readonly string[] BasicAreas = { "wallets", "companies", "market", "items", "fleet", "deliveries", "industry", "contracts", "assignments", "maintenance" };
     public static string Title(string area) => area == "wallets" ? "Finances" : area == "deliveries" ? "Deliveries" : Humanize(area);
     public static string Humanize(string value) => Regex.Replace(value ?? "", "(?<=[a-z])(?=[A-Z])", " ").Replace("_", " ");
     private static JArray Items(JToken? value) => value as JArray ?? new JArray();
@@ -39,7 +39,7 @@ internal static class InGameManagementModel
         if (command == "finance.manage") return operation == "accept" || operation == "draw" || operation == "repay";
         if (command == "assignment.manage" && (operation == "passenger-configure-route" || operation == "passenger-refresh-route")) return false;
         return command.StartsWith("company.", StringComparison.Ordinal) || command.StartsWith("fleet.", StringComparison.Ordinal) ||
-            command == "wallet.transfer" || command == "market.purchase" || command.StartsWith("initial-delivery.", StringComparison.Ordinal) ||
+            command == "wallet.transfer" || command == "market.purchase" || command == "item-shop.purchase" || command.StartsWith("initial-delivery.", StringComparison.Ordinal) ||
             command == "assignment.manage" || command == "assignment.cancel" || command == "yard.manage";
     }
 
@@ -56,7 +56,7 @@ internal static class InGameManagementModel
         foreach (var pair in Labels(source["fleet"], "assetId", "displayName")) names[pair.Key] = pair.Value;
         foreach (var pair in Labels(source["playerChoices"], "id", "name")) names[pair.Key] = pair.Value;
         var collections = new Dictionary<string, IReadOnlyList<IReadOnlyDictionary<string, object>>> {
-            ["wallets"] = web.Wallets, ["companies"] = web.Companies, ["market"] = web.Market,
+            ["wallets"] = web.Wallets, ["companies"] = web.Companies, ["market"] = web.Market, ["items"] = web.Items,
             ["fleet"] = web.Fleet, ["deliveries"] = web.Deliveries, ["industry"] = web.Industry,
             ["contracts"] = web.Contracts, ["assignments"] = web.Assignments, ["maintenance"] = web.Maintenance,
             ["financing"] = web.Financing, ["passengers"] = web.Passengers, ["yardPlans"] = web.YardPlans
